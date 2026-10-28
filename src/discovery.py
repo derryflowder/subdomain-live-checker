@@ -1,6 +1,10 @@
 import httpx
 
+from src.discovery_models import DiscoverySourceResult
+
 CT_URL = "https://crt.sh/"
+MAX_DISCOVERED_HOSTS = 500
+HACKERTARGET_URL = "https://api.hackertarget.com/hostsearch/"
 
 
 class DiscoveryError(Exception):
@@ -51,6 +55,39 @@ def fetch_certificate_names(domain: str) -> list[str]:
     return unique_hostnames(hostnames)
 
 
+def discover_from_crtsh(domain: str) -> DiscoverySourceResult:
+    """Run crt.sh discovery and return a standardized result."""
+    try:
+        hostnames = fetch_certificate_names(domain)
+    except DiscoveryError as exc:
+        return DiscoverySourceResult(
+            source="crt.sh",
+            hostnames=[],
+            error=str(exc),
+        )
+
+    return DiscoverySourceResult(
+        source="crt.sh",
+        hostnames=hostnames,
+    )
+
+def filter_subdomains(hostnames: list[str], domain: str) -> list[str]:
+    """Keep only valid subdomains of the target domain."""
+    normalized_domain = normalize_hostname(domain)
+    suffix = f".{normalized_domain}"
+
+    return sorted(
+        hostname
+        for hostname in unique_hostnames(hostnames)
+        if hostname.endswith(suffix)
+        and hostname != normalized_domain
+        and "*" not in hostname
+    )
+
+def limit_hostnames(hostnames: list[str]) -> list[str]:
+    """Limit the number of discovered hostnames used by the checker."""
+    return hostnames[:MAX_DISCOVERED_HOSTS]
+
 def discover_subdomains(domain: str) -> list[str]:
     """Discover subdomains belonging to the target domain."""
     normalized_domain = normalize_hostname(domain)
@@ -60,14 +97,4 @@ def discover_subdomains(domain: str) -> list[str]:
 
     certificate_names = fetch_certificate_names(normalized_domain)
 
-    suffix = f".{normalized_domain}"
-
-    return sorted(
-    hostname
-    for hostname in certificate_names
-    if (
-        hostname.endswith(suffix)
-        and hostname != normalized_domain
-        and "*" not in hostname
-    )
-)
+    return filter_subdomains(certificate_names, normalized_domain)

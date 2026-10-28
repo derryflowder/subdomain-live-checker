@@ -8,11 +8,13 @@ class WorkerSignals(QObject):
     finished = Signal()
     result = Signal(object)
     error = Signal(str)
+    progress = Signal(int, int)
 
 
 class Worker(QRunnable):
     def __init__(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         super().__init__()
+        self.setAutoDelete(False)
 
         self.function = function
         self.args = args

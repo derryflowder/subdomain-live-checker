@@ -1,96 +1,298 @@
+import csv
+import html
+import os
+from collections import Counter
+from datetime import datetime
+
 from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from src.checker import check_subdomains
-from src.discovery import discover_subdomains
+from src.database import get_previous_results, save_results, init_db, DB_PATH
+from src.discovery_sources import discover_from_all_sources
 from src.gui.workers import Worker
+from src.models import ResultStatus
 
 
 class MainWindow(QMainWindow):
-    """Main application window."""
-
     def __init__(self) -> None:
         super().__init__()
-
         self.setWindowTitle("Subdomain Live Checker")
         self.resize(1280, 760)
         self.setMinimumSize(1000, 650)
 
         self.thread_pool = QThreadPool.globalInstance()
-        self.discovered_subdomains: list[str] = []
+        self.active_workers: set[Worker] = set()
+        self.current_domain = ""
+        self.current_results = []
 
         self._build_ui()
         self._apply_styles()
 
-    def _demo_scan(self) -> str:
-        return "Worker is working"
+    # ---------- workers ----------
+    def _track_worker(self, worker: Worker) -> None:
+        worker.setAutoDelete(False)
+        self.active_workers.add(worker)
+        worker.signals.finished.connect(lambda: self.active_workers.discard(worker))
 
-    def _run_discovery(self) -> list[str]:
-        return discover_subdomains(self.target_input.text().strip())
+    def _run_discovery(self, domain: str):
+        return discover_from_all_sources(domain)
 
-    def _run_checks(self) -> list:
-        return check_subdomains(self.discovered_subdomains)
+    def _run_checks(self, hostnames: list[str], on_progress=None) -> list:
+        return check_subdomains(hostnames, on_progress=on_progress)
 
+    # ---------- flow ----------
     def _start_scan(self) -> None:
-        worker = Worker(self._run_discovery)
-        worker.signals.result.connect(self._handle_scan_result)
-        worker.signals.error.connect(self._handle_scan_error)
-        self.thread_pool.start(worker)
-
-    def _handle_scan_result(self, result: list[str]) -> None:
-        self.discovered_subdomains = result
-
-        if not result:
-            self.status_label.setText("No subdomains discovered")
+        self.current_domain = self.target_input.text().strip()
+        if not self.current_domain:
+            self.status_label.setText("Enter a target domain")
             return
 
-        preview = ", ".join(result[:3])
-        self.status_label.setText(
-            f"Discovered {len(result)} subdomains: {preview}"
-        )
+        self.scan_button.setEnabled(False)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setValue(0)
+        self.results_table.setRowCount(0)
+        self.results_table.setVisible(False)
+        self.legend.setVisible(False)
+        
+        self._update_summary(discovered=0, live=0, issues=0)
+        self.status_label.setText(f"Discovering subdomains for {self.current_domain}...")
 
-        worker = Worker(self._run_checks)
-        worker.signals.result.connect(self._handle_check_result)
-        worker.signals.error.connect(self._handle_scan_error)
+        worker = Worker(self._run_discovery, self.current_domain)
+        worker.signals.result.connect(self._handle_discovery_result)
+        worker.signals.error.connect(self._handle_discovery_error)
+        self._track_worker(worker)
         self.thread_pool.start(worker)
 
+    def _handle_discovery_result(self, result) -> None:
+        hostnames, source_results = result
+
+        if not hostnames:
+            self.scan_button.setEnabled(True)
+            errors = [f"{s.source}: {s.error}" for s in source_results if s.error]
+            self.status_label.setText("Discovery failed: " + " | ".join(errors) if errors else "No subdomains found")
+            return
+
+        self._update_summary(discovered=len(hostnames))
+        self.status_label.setText(f"Discovered {len(hostnames)} subdomains. Starting HTTP checks...")
+
+        self.progress_bar.setMaximum(len(hostnames))
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.results_table.setRowCount(0)
+        self.results_table.setVisible(True)
+        self.legend.setVisible(True)
+
+        worker = Worker(self._run_checks, hostnames)
+        worker.kwargs["on_progress"] = worker.signals.progress.emit
+        worker.signals.progress.connect(self._handle_check_progress)
+        worker.signals.result.connect(self._handle_check_result)
+        worker.signals.error.connect(self._handle_check_error)
+        self._track_worker(worker)
+        self.thread_pool.start(worker)
+
+    def _handle_check_progress(self, done: int, total: int) -> None:
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(done)
+        self.status_label.setText(f"Checking subdomains: {done}/{total}")
+
     def _handle_check_result(self, results: list) -> None:
-        live_count = sum(
-            1
-            for result in results
-            if result.status is not None
-            and result.status.value in {"live", "redirect", "forbidden"}
-        )
+        self.progress_bar.setVisible(False)
+        self.current_results = results
+        
+        previous_data = get_previous_results(self.current_domain)
 
-        self.status_label.setText(
-            f"Checked {len(results)} subdomains | Reachable: {live_count}"
-        )
+        # Улучшенный Diff (сравниваем и код, и текстовый статус)
+        for r in results:
+            prev = previous_data.get(r.hostname)
+            current_code = r.status_code if r.status_code is not None else -1
+            current_text = r.status.value if r.status else ""
+            
+            if not prev:
+                r.is_new = True
+            elif prev["status_code"] != current_code or prev["status_text"] != current_text:
+                r.status_changed = True
 
-    def _handle_scan_error(self, error: str) -> None:
-        self.status_label.setText(f"Discovery error: {error}")
+        save_results(self.current_domain, results)
 
+        counts = Counter((r.status.value if r.status else "unknown") for r in results)
+        live = counts.get("live", 0) + counts.get("redirect", 0) + counts.get("forbidden", 0)
+        issues = len(results) - live
+        takeovers = sum(1 for r in results if r.takeover)
+
+        self._update_summary(live=live, issues=issues)
+        
+        status_text = f"Checked {len(results)} | Live: {live} | Issues: {issues}"
+        if takeovers > 0:
+            status_text += f" | ⚠️ Potential Takeovers: {takeovers}"
+        self.status_label.setText(status_text)
+
+        self._populate_table(results)
+        self.scan_button.setEnabled(True)
+
+    def _populate_table(self, results: list) -> None:
+        self.results_table.setRowCount(len(results))
+        for row, r in enumerate(results):
+            # Жесткая проверка на None для чисел
+            code_str = str(r.status_code) if r.status_code is not None else "-"
+            time_str = f"{r.response_time_ms:.1f}" if r.response_time_ms is not None else "-"
+            status_str = r.status.value if r.status else "-"
+            
+            host_item = QTableWidgetItem(r.hostname)
+            status_item = QTableWidgetItem(status_str)
+            code_item = QTableWidgetItem(code_str)
+            time_item = QTableWidgetItem(time_str)
+            
+            extra = r.title or r.error or "-"
+            if r.takeover:
+                extra = f"⚠️ Potential Takeover: {r.takeover}"
+            extra_item = QTableWidgetItem(extra)
+
+            bg_color = None
+            fg_color = QColor("#e2e8f0")
+
+            if r.takeover:
+                bg_color = QColor("#7f1d1d") 
+                fg_color = QColor("#fecaca") 
+            elif r.is_new:
+                bg_color = QColor("#064e3b") 
+                fg_color = QColor("#d1fae5")
+            elif r.status_changed:
+                bg_color = QColor("#78350f") 
+                fg_color = QColor("#fef3c7")
+            elif r.status_code in (401, 403):
+                bg_color = QColor("#312e81") 
+                fg_color = QColor("#e0e7ff")
+            elif r.status == ResultStatus.LIVE and r.title and any(k in r.title.lower() for k in ["admin", "panel", "login", "dashboard"]):
+                bg_color = QColor("#4c1d95") 
+                fg_color = QColor("#ede9fe")
+
+            items = [host_item, status_item, code_item, time_item, extra_item]
+            for col, item in enumerate(items):
+                if bg_color:
+                    item.setBackground(bg_color)
+                item.setForeground(fg_color)
+                self.results_table.setItem(row, col, item)
+
+    def _handle_discovery_error(self, error: str) -> None:
+        self.progress_bar.setVisible(False)
+        self.scan_button.setEnabled(True)
+        self.status_label.setText(f"Discovery error: {error or 'unknown error'}")
+
+    def _handle_check_error(self, error: str) -> None:
+        self.progress_bar.setVisible(False)
+        self.scan_button.setEnabled(True)
+        self.status_label.setText(f"HTTP check error: {error or 'unknown error'}")
+
+    def _update_summary(self, discovered: int | None = None, live: int | None = None, issues: int | None = None) -> None:
+        if discovered is not None: self.discovered_value.setText(str(discovered))
+        if live is not None: self.live_value.setText(str(live))
+        if issues is not None: self.issues_value.setText(str(issues))
+
+    def _clear_history(self) -> None:
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
+            init_db()
+        self.status_label.setText("History cleared. Next scan will mark all subdomains as NEW.")
+
+    # ---------- Export ----------
+    def _export_csv(self) -> None:
+        if not self.current_results: return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save CSV", f"{self.current_domain}_scan.csv", "CSV Files (*.csv)")
+        if not file_path: return
+
+        with open(file_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Hostname", "Status", "Code", "Time (ms)", "Title/Error", "Takeover Indicator", "New", "Changed"])
+            for r in self.current_results:
+                writer.writerow([
+                    r.hostname, r.status.value if r.status else "", 
+                    r.status_code if r.status_code is not None else "", 
+                    r.response_time_ms if r.response_time_ms is not None else "", 
+                    r.title or r.error or "", r.takeover or "", 
+                    "Yes" if r.is_new else "No", "Yes" if r.status_changed else "No"
+                ])
+
+    def _export_html(self) -> None:
+        if not self.current_results: return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save HTML Report", f"{self.current_domain}_report.html", "HTML Files (*.html)")
+        if not file_path: return
+
+        # Защита от XSS
+        safe_domain = html.escape(self.current_domain)
+
+        html_content = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Report: {safe_domain}</title>
+<style>
+body {{ background: #0b0f14; color: #e2e8f0; font-family: sans-serif; padding: 20px; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
+th, td {{ border: 1px solid #202936; padding: 8px; text-align: left; }}
+th {{ background: #111720; color: #8996a8; }}
+.tr-new {{ background: #064e3b; color: #d1fae5; }}
+.tr-changed {{ background: #78350f; color: #fef3c7; }}
+.tr-takeover {{ background: #7f1d1d; color: #fecaca; }}
+.tr-auth {{ background: #312e81; color: #e0e7ff; }}
+</style></head><body>
+<h2>Subdomain Scan Report: {safe_domain}</h2>
+<p>Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+<table>
+<tr><th>Hostname</th><th>Status</th><th>Code</th><th>Time</th><th>Title/Error</th></tr>"""
+
+        for r in self.current_results:
+            row_class = ""
+            if r.takeover: row_class = "tr-takeover"
+            elif r.is_new: row_class = "tr-new"
+            elif r.status_changed: row_class = "tr-changed"
+            elif r.status_code in (401, 403): row_class = "tr-auth"
+
+            safe_hostname = html.escape(r.hostname)
+            safe_title = html.escape(r.title or r.error or "-")
+            if r.takeover: safe_title = f"⚠️ Potential Takeover: {html.escape(r.takeover)}"
+            
+            code_val = r.status_code if r.status_code is not None else '-'
+            time_val = f"{r.response_time_ms} ms" if r.response_time_ms is not None else '-'
+            status_val = r.status.value if r.status else '-'
+
+            html_content += f"""
+            <tr class="{row_class}">
+                <td>{safe_hostname}</td>
+                <td>{status_val}</td>
+                <td>{code_val}</td>
+                <td>{time_val}</td>
+                <td>{safe_title}</td>
+            </tr>"""
+        
+        html_content += "</table></body></html>"
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+
+    # ---------- UI ----------
     def _build_ui(self) -> None:
         central_widget = QWidget()
         central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
-
         root_layout = QHBoxLayout(central_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
         sidebar = self._build_sidebar()
         content = self._build_content()
-
         root_layout.addWidget(sidebar)
         root_layout.addWidget(content, 1)
 
@@ -98,266 +300,146 @@ class MainWindow(QMainWindow):
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(240)
-
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(24, 28, 24, 24)
         layout.setSpacing(16)
 
-        logo = QLabel("SLC")
-        logo.setObjectName("logo")
+        logo = QLabel("SLC"); logo.setObjectName("logo")
+        subtitle = QLabel("Subdomain\nLive Checker"); subtitle.setObjectName("sidebarTitle")
+        description = QLabel("Passive discovery\nand low-impact\nHTTP checks."); description.setObjectName("sidebarDescription")
+        version = QLabel("v0.2.1 - Inteligence"); version.setObjectName("version")
 
-        subtitle = QLabel("Subdomain\nLive Checker")
-        subtitle.setObjectName("sidebarTitle")
-
-        description = QLabel("Passive discovery\nand low-impact\nHTTP checks.")
-        description.setObjectName("sidebarDescription")
-
-        layout.addWidget(logo)
-        layout.addWidget(subtitle)
-        layout.addSpacing(16)
-        layout.addWidget(description)
-        layout.addStretch()
-
-        version = QLabel("v0.1.0")
-        version.setObjectName("version")
-        layout.addWidget(version)
-
+        layout.addWidget(logo); layout.addWidget(subtitle); layout.addSpacing(16); layout.addWidget(description)
+        layout.addStretch(); layout.addWidget(version)
         return sidebar
 
+    def _make_summary_card(self, label_text: str) -> tuple[QLabel, QFrame]:
+        card = QFrame(); card.setObjectName("summaryCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(18, 16, 18, 16); card_layout.setSpacing(4)
+        value = QLabel("0"); value.setObjectName("summaryValue")
+        label = QLabel(label_text); label.setObjectName("summaryLabel")
+        card_layout.addWidget(value); card_layout.addWidget(label)
+        return value, card
+
     def _build_content(self) -> QWidget:
-        content = QWidget()
-        content.setObjectName("content")
-
+        content = QWidget(); content.setObjectName("content")
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(36, 32, 36, 32)
-        layout.setSpacing(24)
+        layout.setContentsMargins(36, 32, 36, 32); layout.setSpacing(20)
 
-        summary_grid = QGridLayout()
-        summary_grid.setSpacing(12)
-
+        summary_grid = QGridLayout(); summary_grid.setSpacing(12)
         layout.addLayout(summary_grid)
 
-        discovered_card = QFrame()
-        discovered_card.setObjectName("summaryCard")
-
-        discovered_layout = QVBoxLayout(discovered_card)
-        discovered_layout.setContentsMargins(18, 16, 18, 16)
-        discovered_layout.setSpacing(4)
-
-        discovered_value = QLabel("0")
-        discovered_value.setObjectName("summaryValue")
-
-        discovered_label = QLabel("Discovered")
-        discovered_label.setObjectName("summaryLabel")
-
-        discovered_layout.addWidget(discovered_value)
-        discovered_layout.addWidget(discovered_label)
+        self.discovered_value, discovered_card = self._make_summary_card("Discovered")
+        self.live_value, live_card = self._make_summary_card("Live")
+        self.issues_value, issues_card = self._make_summary_card("Issues")
 
         summary_grid.addWidget(discovered_card, 0, 0)
-
-        live_card = QFrame()
-        live_card.setObjectName("summaryCard")
-
-        live_layout = QVBoxLayout(live_card)
-        live_layout.setContentsMargins(18, 16, 18, 16)
-        live_layout.setSpacing(4)
-
-        live_value = QLabel("0")
-        live_value.setObjectName("summaryValue")
-
-        live_label = QLabel("Live")
-        live_label.setObjectName("summaryLabel")
-
-        live_layout.addWidget(live_value)
-        live_layout.addWidget(live_label)
-
         summary_grid.addWidget(live_card, 0, 1)
+        summary_grid.addWidget(issues_card, 0, 2)
 
-        live_card = QFrame()
-        live_card.setObjectName("summaryCard")
+        header = QLabel("Subdomain Scanner"); header.setObjectName("pageTitle")
+        description = QLabel("Discover subdomains and inspect their HTTP(S) availability."); description.setObjectName("pageDescription")
 
-        live_layout = QVBoxLayout(live_card)
-        live_layout.setContentsMargins(18, 16, 18, 16)
-        live_layout.setSpacing(4)
-
-        live_value = QLabel("0")
-        live_value.setObjectName("summaryValue")
-
-        live_label = QLabel("Live")
-        live_label.setObjectName("summaryLabel")
-
-        live_layout.addWidget(live_value)
-        live_layout.addWidget(live_label)
-
-        summary_grid.addWidget(live_card, 0, 1)
-
-        header = QLabel("Subdomain Scanner")
-        header.setObjectName("pageTitle")
-
-        description = QLabel("Discover subdomains and inspect their HTTP(S) availability.")
-        description.setObjectName("pageDescription")
-
-        target_frame = QFrame()
-        target_frame.setObjectName("targetFrame")
-
+        target_frame = QFrame(); target_frame.setObjectName("targetFrame")
         target_layout = QVBoxLayout(target_frame)
-        target_layout.setContentsMargins(20, 20, 20, 20)
-        target_layout.setSpacing(12)
+        target_layout.setContentsMargins(20, 20, 20, 20); target_layout.setSpacing(12)
+        
+        target_label = QLabel("Target domain"); target_label.setObjectName("sectionLabel")
+        input_row = QHBoxLayout(); input_row.setSpacing(12)
 
-        target_label = QLabel("Target domain")
-        target_label.setObjectName("sectionLabel")
+        self.target_input = QLineEdit(); self.target_input.setObjectName("targetInput")
+        self.target_input.setPlaceholderText("example.com"); self.target_input.setMinimumHeight(48)
 
-        input_row = QHBoxLayout()
-        input_row.setSpacing(12)
-
-        self.target_input = QLineEdit()
-        self.target_input.setObjectName("targetInput")
-        self.target_input.setPlaceholderText("example.com")
-        self.target_input.setMinimumHeight(48)
-
-        self.scan_button = QPushButton("Scan")
-        self.scan_button.setObjectName("scanButton")
-        self.scan_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.scan_button.setMinimumSize(120, 48)
+        self.scan_button = QPushButton("Scan"); self.scan_button.setObjectName("scanButton")
+        self.scan_button.setCursor(Qt.CursorShape.PointingHandCursor); self.scan_button.setMinimumSize(120, 48)
         self.scan_button.clicked.connect(self._start_scan)
+
+        self.clear_btn = QPushButton("Clear DB"); self.clear_btn.setObjectName("exportButton")
+        self.clear_btn.setMinimumSize(80, 48); self.clear_btn.clicked.connect(self._clear_history)
+        
+        self.export_csv_btn = QPushButton("CSV"); self.export_csv_btn.setObjectName("exportButton")
+        self.export_csv_btn.setMinimumSize(80, 48); self.export_csv_btn.clicked.connect(self._export_csv)
+        
+        self.export_html_btn = QPushButton("HTML"); self.export_html_btn.setObjectName("exportButton")
+        self.export_html_btn.setMinimumSize(80, 48); self.export_html_btn.clicked.connect(self._export_html)
 
         input_row.addWidget(self.target_input, 1)
         input_row.addWidget(self.scan_button)
+        input_row.addWidget(self.clear_btn)
+        input_row.addWidget(self.export_csv_btn)
+        input_row.addWidget(self.export_html_btn)
 
-        target_layout.addWidget(target_label)
-        target_layout.addLayout(input_row)
+        target_layout.addWidget(target_label); target_layout.addLayout(input_row)
 
-        status_frame = QFrame()
-        status_frame.setObjectName("statusFrame")
+        status_frame = QFrame(); status_frame.setObjectName("statusFrame")
         status_layout = QVBoxLayout(status_frame)
-        status_layout.setContentsMargins(20, 18, 20, 18)
+        status_layout.setContentsMargins(20, 18, 20, 18); status_layout.setSpacing(10)
 
-        self.status_label = QLabel("Ready to scan")
-        self.status_label.setObjectName("statusLabel")
+        self.progress_bar = QProgressBar(); self.progress_bar.setObjectName("progressBar")
+        self.progress_bar.setFixedHeight(6); self.progress_bar.setTextVisible(False)
+        self.progress_bar.setValue(0); self.progress_bar.setVisible(False)
 
-        status_layout.addWidget(self.status_label)
+        self.status_label = QLabel("Ready to scan"); self.status_label.setObjectName("statusLabel")
+        status_layout.addWidget(self.progress_bar); status_layout.addWidget(self.status_label)
 
-        layout.addWidget(header)
-        layout.addWidget(description)
-        layout.addWidget(target_frame)
-        layout.addWidget(status_frame)
-        layout.addStretch()
+        self.results_table = QTableWidget()
+        self.results_table.setObjectName("resultsTable")
+        self.results_table.setColumnCount(5)
+        self.results_table.setHorizontalHeaderLabels(["Hostname", "Status", "Code", "Time (ms)", "Title / Error"])
+        
+        header_view = self.results_table.horizontalHeader()
+        header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
 
+        self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.results_table.verticalHeader().setVisible(False)
+        self.results_table.setVisible(False)
+
+        legend_label = QLabel("Легенда:  🟩 Новый поддомен   |   🟨 Изменился статус   |   🟥 Индикатор Takeover   |   🟦 401/403 (Доступ закрыт)   |   🟪 Админ-панель")
+        legend_label.setObjectName("legendLabel")
+        legend_label.setVisible(False)
+        self.legend = legend_label
+
+        layout.addWidget(header); layout.addWidget(description)
+        layout.addWidget(target_frame); layout.addWidget(status_frame)
+        layout.addWidget(self.results_table, 1)
+        layout.addWidget(self.legend)
         return content
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow {
-                background: #0b0f14;
-            }
-
-            QWidget#centralWidget {
-                background: #0b0f14;
-            }
-
-            QFrame#sidebar {
-                background: #111720;
-                border-right: 1px solid #202936;
-            }
-
-            QLabel#logo {
-                color: #7dd3fc;
-                font-size: 28px;
-                font-weight: 800;
-            }
-
-            QLabel#sidebarTitle {
-                color: #f1f5f9;
-                font-size: 17px;
-                font-weight: 700;
-            }
-
-            QLabel#sidebarDescription {
-                color: #8491a3;
-                font-size: 13px;
-                line-height: 1.4;
-            }
-
-            QLabel#version {
-                color: #566273;
-                font-size: 12px;
-            }
-
-            QLabel#pageTitle {
-                color: #f8fafc;
-                font-size: 30px;
-                font-weight: 750;
-            }
-
-            QLabel#pageDescription {
-                color: #8996a8;
-                font-size: 14px;
-            }
-
-            QFrame#targetFrame,
-            QFrame#statusFrame {
-                background: #111720;
-                border: 1px solid #202936;
-                border-radius: 12px;
-            }
-
-            QLabel#sectionLabel {
-                color: #d8e0ea;
-                font-size: 13px;
-                font-weight: 650;
-            }
-
-            QLineEdit#targetInput {
-                background: #0b0f14;
-                color: #f8fafc;
-                border: 1px solid #2a3544;
-                border-radius: 8px;
-                padding: 0 14px;
-                font-size: 14px;
-            }
-
-            QLineEdit#targetInput:focus {
-                border: 1px solid #38bdf8;
-            }
-
-            QPushButton#scanButton {
-                background: #38bdf8;
-                color: #071018;
-                border: none;
-                border-radius: 8px;
-                padding: 0 20px;
-                font-size: 14px;
-                font-weight: 700;
-            }
-
-            QPushButton#scanButton:hover {
-                background: #67cdf9;
-            }
-
-            QPushButton#scanButton:pressed {
-                background: #0ea5e9;
-            }
-
-            QLabel#statusLabel {
-                color: #8f9cad;
-                font-size: 13px;
-            }
-                        QFrame#summaryCard {
-                background: #111720;
-                border: 1px solid #202936;
-                border-radius: 12px;
-            }
-
-            QLabel#summaryValue {
-                color: #f8fafc;
-                font-size: 26px;
-                font-weight: 750;
-            }
-
-            QLabel#summaryLabel {
-                color: #8996a8;
-                font-size: 12px;
-            }
-            """
-        )
+        self.setStyleSheet("""
+            QMainWindow { background: #0b0f14; }
+            QWidget#centralWidget { background: #0b0f14; }
+            QFrame#sidebar { background: #111720; border-right: 1px solid #202936; }
+            QLabel#logo { color: #7dd3fc; font-size: 28px; font-weight: 800; }
+            QLabel#sidebarTitle { color: #f1f5f9; font-size: 17px; font-weight: 700; }
+            QLabel#sidebarDescription { color: #8491a3; font-size: 13px; line-height: 1.4; }
+            QLabel#version { color: #566273; font-size: 12px; }
+            QLabel#pageTitle { color: #f8fafc; font-size: 30px; font-weight: 750; }
+            QLabel#pageDescription { color: #8996a8; font-size: 14px; }
+            QLabel#legendLabel { color: #64748b; font-size: 12px; margin-top: 5px; }
+            QFrame#targetFrame, QFrame#statusFrame { background: #111720; border: 1px solid #202936; border-radius: 12px; }
+            QLabel#sectionLabel { color: #d8e0ea; font-size: 13px; font-weight: 650; }
+            QLineEdit#targetInput { background: #0b0f14; color: #f8fafc; border: 1px solid #2a3544; border-radius: 8px; padding: 0 14px; font-size: 14px; }
+            QLineEdit#targetInput:focus { border: 1px solid #38bdf8; }
+            QPushButton#scanButton { background: #38bdf8; color: #071018; border: none; border-radius: 8px; padding: 0 20px; font-size: 14px; font-weight: 700; }
+            QPushButton#scanButton:hover { background: #67cdf9; }
+            QPushButton#scanButton:disabled { background: #22303f; color: #566273; }
+            QPushButton#exportButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 8px; font-size: 13px; font-weight: 600; }
+            QPushButton#exportButton:hover { background: #334155; color: #f8fafc; }
+            QLabel#statusLabel { color: #8f9cad; font-size: 13px; }
+            QProgressBar#progressBar { background: #0b0f14; border: none; border-radius: 3px; }
+            QProgressBar#progressBar::chunk { background: #38bdf8; border-radius: 3px; }
+            QFrame#summaryCard { background: #111720; border: 1px solid #202936; border-radius: 12px; }
+            QLabel#summaryValue { color: #f8fafc; font-size: 26px; font-weight: 750; }
+            QLabel#summaryLabel { color: #8996a8; font-size: 12px; }
+            QTableWidget#resultsTable { background: #111720; color: #e2e8f0; border: 1px solid #202936; border-radius: 8px; gridline-color: #202936; font-size: 13px; outline: none; }
+            QTableWidget#resultsTable::item { padding: 4px 8px; }
+            QTableWidget#resultsTable::item:selected { background: #38bdf8; color: #071018; }
+            QHeaderView::section { background: #0b0f14; color: #8996a8; padding: 8px; border: none; border-bottom: 1px solid #202936; font-weight: 600; }
+        """)
