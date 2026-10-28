@@ -202,3 +202,29 @@ def test_check_subdomains_checks_hostnames_in_order(monkeypatch) -> None:
     assert checked_hostnames == hostnames
     assert [result.hostname for result in results] == hostnames
     assert all(result.status == ResultStatus.LIVE for result in results)
+
+def test_check_subdomains_preserves_order(monkeypatch) -> None:
+    from src.models import ResultStatus, SubdomainResult
+
+    def fake_check(hostname: str) -> SubdomainResult:
+        return SubdomainResult(
+            hostname=hostname,
+            status=ResultStatus.LIVE,
+            status_code=200,
+        )
+
+    monkeypatch.setattr("src.checker.check_subdomain", fake_check)
+
+    results = check_subdomains(
+        ["a.example.com", "b.example.com", "c.example.com"]
+    )
+
+    assert [result.hostname for result in results] == [
+        "a.example.com",
+        "b.example.com",
+        "c.example.com",
+    ]
+
+
+def test_check_subdomains_empty_list() -> None:
+    assert check_subdomains([]) == []
