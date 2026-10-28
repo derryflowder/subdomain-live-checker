@@ -164,8 +164,16 @@ class MainWindow(QMainWindow):
         try:
             previous_data = get_previous_results(self.current_domain)
         except DatabaseError as exc:
-            QMessageBox.warning(self, "History unavailable", str(exc))
-            previous_data = {}
+            QMessageBox.warning(
+                self,
+                "History unavailable",
+                f"Cannot compare with the previous scan:\n{exc}",
+            )
+            self.status_label.setText(
+                "Scan completed, but history comparison failed."
+            )
+            self.scan_button.setEnabled(True)
+            return
 
         current_data = {
             r.hostname: {
