@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.models import SubdomainResult
@@ -8,54 +9,126 @@ DB_PATH = BASE_DIR / "scan_history.db"
 
 
 def init_db():
-    """Создает таблицу, если её нет."""
+    """Создает таблицы истории сканирования, если их еще нет."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS last_scan (
-                domain TEXT,
-                hostname TEXT,
-                status_code INTEGER,
-                status_text TEXT,
-                PRIMARY KEY (domain, hostname)
+            CREATE TABLE IF NOT EXISTS scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL,
+                started_at TEXT NOT NULL
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_results (
+                scan_id INTEGER NOT NULL,
+                hostname TEXT NOT NULL,
+                status_code INTEGER,
+                status_text TEXT,
+                PRIMARY KEY (scan_id, hostname),
+                FOREIGN KEY (scan_id) REFERENCES scans(id)
+            )
+        """)
+
         conn.commit()
 
 
 def get_previous_results(domain: str) -> dict[str, dict]:
-    """Возвращает результаты предыдущего скана в виде словаря {hostname: {data}}."""
+    """Возвращает результаты последнего завершенного скана домена."""
     init_db()
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
+
         cursor = conn.execute(
-            "SELECT hostname, status_code, status_text FROM last_scan WHERE domain = ?", (domain,)
+            """
+            SELECT hostname, status_code, status_text
+            FROM scan_results
+            WHERE scan_id = (
+                SELECT id
+                FROM scans
+                WHERE domain = ?
+                ORDER BY id DESC
+                LIMIT 1
+            )
+            """,
+            (domain,),
         )
-        return {row["hostname"]: dict(row) for row in cursor.fetchall()}
+
+        return {
+            row["hostname"]: dict(row)
+            for row in cursor.fetchall()
+        }
 
 
 def save_results(domain: str, results: list[SubdomainResult]):
-    """Сохраняет текущий скан, перезаписывая старые данные для этого домена."""
+    """Создает новый скан и сохраняет его результаты."""
     init_db()
+
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("DELETE FROM last_scan WHERE domain = ?", (domain,))
-            data = [
+            cursor = conn.execute(
+                """
+                INSERT INTO scans (domain, started_at)
+                VALUES (?, ?)
+                """,
                 (
                     domain,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+            scan_id = cursor.lastrowid
+
+            data = [
+                (
+                    scan_id,
                     r.hostname,
                     r.status_code if r.status_code is not None else -1,
                     r.status.value if r.status else "",
                 )
                 for r in results
             ]
+
             conn.executemany(
-    """
-    INSERT INTO last_scan (
-        domain, hostname, status_code, status_text
-    ) VALUES (?, ?, ?, ?)
-    """,
-    data,
-)
+                """
+                INSERT INTO scan_results (
+                    scan_id, hostname, status_code, status_text
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                data,
+            )
+
             conn.commit()
+
     except sqlite3.Error as e:
-        print(f"Database error: {e}")  # В будущем заменить на logging
+        print(f"Database error: {e}")
+
+def calculate_diff(
+    previous: dict[str, dict],
+    current: dict[str, dict],
+) -> dict[str, set[str]]:
+    """Сравнивает два скана и возвращает NEW, CHANGED и REMOVED."""
+    previous_hosts = set(previous)
+    current_hosts = set(current)
+
+    new_hosts = current_hosts - previous_hosts
+    removed_hosts = previous_hosts - current_hosts
+
+    changed_hosts = {
+        hostname
+        for hostname in previous_hosts & current_hosts
+        if (
+            previous[hostname]["status_code"]
+            != current[hostname]["status_code"]
+            or previous[hostname]["status_text"]
+            != current[hostname]["status_text"]
+        )
+    }
+
+    return {
+        "new": new_hosts,
+        "changed": changed_hosts,
+        "removed": removed_hosts,
+    }

@@ -24,7 +24,13 @@ from PySide6.QtWidgets import (
 )
 
 from src.checker import check_subdomains
-from src.database import DB_PATH, get_previous_results, init_db, save_results
+from src.database import (
+    DB_PATH,
+    calculate_diff,
+    get_previous_results,
+    init_db,
+    save_results,
+)
 from src.discovery_sources import discover_from_all_sources
 from src.gui.workers import Worker
 from src.models import ResultStatus
@@ -122,16 +128,20 @@ class MainWindow(QMainWindow):
 
         previous_data = get_previous_results(self.current_domain)
 
-        # Улучшенный Diff (сравниваем и код, и текстовый статус)
-        for r in results:
-            prev = previous_data.get(r.hostname)
-            current_code = r.status_code if r.status_code is not None else -1
-            current_text = r.status.value if r.status else ""
+        current_data = {
+            r.hostname: {
+                "hostname": r.hostname,
+                "status_code": r.status_code if r.status_code is not None else -1,
+                "status_text": r.status.value if r.status else "",
+            }
+            for r in results
+        }
 
-            if not prev:
-                r.is_new = True
-            elif prev["status_code"] != current_code or prev["status_text"] != current_text:
-                r.status_changed = True
+        diff = calculate_diff(previous_data, current_data)
+
+        for r in results:
+            r.is_new = r.hostname in diff["new"]
+            r.status_changed = r.hostname in diff["changed"]
 
         save_results(self.current_domain, results)
 
@@ -142,7 +152,12 @@ class MainWindow(QMainWindow):
 
         self._update_summary(live=live, issues=issues)
 
-        status_text = f"Checked {len(results)} | Live: {live} | Issues: {issues}"
+        status_text = (
+            f"Checked {len(results)} | Live: {live} | Issues: {issues}"
+            f" | New: {len(diff['new'])}"
+            f" | Changed: {len(diff['changed'])}"
+            f" | Removed: {len(diff['removed'])}"
+        )
         if takeovers > 0:
             status_text += f" | ⚠️ Potential Takeovers: {takeovers}"
         self.status_label.setText(status_text)
