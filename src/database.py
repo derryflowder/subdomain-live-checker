@@ -8,6 +8,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "scan_history.db"
 
 
+class DatabaseError(Exception):
+    """Raised when the scan history database cannot be read or written."""
+
+
 def init_db():
     """Создает таблицы истории сканирования, если их еще нет."""
     with sqlite3.connect(DB_PATH) as conn:
@@ -37,28 +41,31 @@ def get_previous_results(domain: str) -> dict[str, dict]:
     """Возвращает результаты последнего завершенного скана домена."""
     init_db()
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
 
-        cursor = conn.execute(
-            """
-            SELECT hostname, status_code, status_text
-            FROM scan_results
-            WHERE scan_id = (
-                SELECT id
-                FROM scans
-                WHERE domain = ?
-                ORDER BY id DESC
-                LIMIT 1
+            cursor = conn.execute(
+                """
+                SELECT hostname, status_code, status_text
+                FROM scan_results
+                WHERE scan_id = (
+                    SELECT id
+                    FROM scans
+                    WHERE domain = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                """,
+                (domain,),
             )
-            """,
-            (domain,),
-        )
 
-        return {
-            row["hostname"]: dict(row)
-            for row in cursor.fetchall()
-        }
+            return {
+                row["hostname"]: dict(row)
+                for row in cursor.fetchall()
+            }
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to read scan history: {exc}") from exc
 
 
 def save_results(domain: str, results: list[SubdomainResult]):
@@ -101,9 +108,9 @@ def save_results(domain: str, results: list[SubdomainResult]):
             )
 
             conn.commit()
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to save scan results: {exc}") from exc
 
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
 
 def calculate_diff(
     previous: dict[str, dict],

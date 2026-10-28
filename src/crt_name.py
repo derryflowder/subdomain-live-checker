@@ -3,6 +3,7 @@ import httpx
 from src.discovery_models import DiscoverySourceResult
 
 CRT_NAME_URL = "https://crt.name/v1/search"
+MAX_CRT_NAME_LINES = 2000
 
 
 class CrtNameDiscoveryError(Exception):
@@ -26,7 +27,8 @@ def fetch_crt_name_names(domain: str) -> list[str]:
     except httpx.HTTPError as exc:
         raise CrtNameDiscoveryError(f"crt.name discovery failed: {exc}") from exc
 
-    return [line.strip() for line in response.text.splitlines() if line.strip()]
+    lines = response.text.splitlines()[:MAX_CRT_NAME_LINES]
+    return [line.strip() for line in lines if line.strip()]
 
 
 def discover_from_crt_name(domain: str) -> DiscoverySourceResult:

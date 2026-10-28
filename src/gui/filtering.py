@@ -1,10 +1,19 @@
-
 from src.models import ResultStatus, SubdomainResult
 
 LIVE_STATUSES = {
     ResultStatus.LIVE,
     ResultStatus.REDIRECT,
     ResultStatus.FORBIDDEN,
+}
+
+VALID_FILTERS = {
+    "All",
+    "Live",
+    "Issues",
+    "New",
+    "Changed",
+    "Removed",
+    "Takeover",
 }
 
 
@@ -14,6 +23,9 @@ def filter_results(
     query: str = "",
 ) -> list[SubdomainResult]:
     """Filter scan results by category and hostname."""
+    if filter_name not in VALID_FILTERS:
+        raise ValueError(f"Unknown filter: {filter_name}")
+
     normalized_query = query.strip().casefold()
     filtered = []
 
@@ -35,10 +47,6 @@ def filter_results(
             continue
         elif filter_name == "Takeover" and not result.takeover:
             continue
-        elif filter_name != "All" and filter_name not in {
-            "Live", "Issues", "New", "Changed", "Removed", "Takeover"
-        }:
-            raise ValueError(f"Unknown filter: {filter_name}")
 
         filtered.append(result)
 

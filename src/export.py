@@ -1,4 +1,3 @@
-
 import csv
 import html
 from datetime import datetime
@@ -16,7 +15,20 @@ CSV_HEADERS = [
     "New",
     "Changed",
     "Removed",
+    "Final URL",
+    "Content-Type",
+    "Server",
 ]
+
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value) -> str:
+    """Prevent CSV formula injection (Excel / LibreOffice / Google Sheets)."""
+    text = "" if value is None else str(value)
+    if text and text[0] in _CSV_INJECTION_PREFIXES:
+        return "'" + text
+    return text
 
 
 def build_csv(results: list[SubdomainResult]) -> str:
@@ -35,11 +47,14 @@ def build_csv(results: list[SubdomainResult]) -> str:
                     if result.response_time_ms is not None
                     else ""
                 ),
-                result.title or result.error or "",
-                result.takeover or "",
+                _safe_cell(result.title or result.error or ""),
+                _safe_cell(result.takeover or ""),
                 "Yes" if result.is_new else "No",
                 "Yes" if result.status_changed else "No",
                 "Yes" if result.is_removed else "No",
+                _safe_cell(result.final_url or ""),
+                _safe_cell(result.content_type or ""),
+                _safe_cell(result.server or ""),
             ]
         )
 
@@ -74,7 +89,7 @@ th {{ background: #111720; color: #8996a8; }}
 <table>
 <tr>
 <th>Hostname</th><th>Status</th><th>Code</th>
-<th>Time</th><th>Title/Error</th><th>Removed</th>
+<th>Time</th><th>Title/Error</th><th>Final URL</th><th>Removed</th>
 </tr>
 """
     )
@@ -118,15 +133,17 @@ th {{ background: #111720; color: #8996a8; }}
         )
         safe_status = html.escape(status_value)
         removed_value = "Yes" if result.is_removed else "No"
+        final_url_value = html.escape(result.final_url or "-")
 
         output.write(
             f"""
-<tr class="{row_class}">
+<tr class="{html.escape(row_class)}">
 <td>{safe_hostname}</td>
 <td>{safe_status}</td>
 <td>{code_value}</td>
 <td>{time_value}</td>
 <td>{safe_title}</td>
+<td>{final_url_value}</td>
 <td>{removed_value}</td>
 </tr>
 """

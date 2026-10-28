@@ -1,4 +1,3 @@
-
 import pytest
 
 from src.gui.filtering import filter_results
@@ -93,3 +92,8 @@ def test_search_and_filter_work_together(sample_results):
 def test_unknown_filter_raises_error(sample_results):
     with pytest.raises(ValueError, match="Unknown filter"):
         filter_results(sample_results, filter_name="Unknown")
+
+
+def test_unknown_filter_raises_error_on_empty_list():
+    with pytest.raises(ValueError, match="Unknown filter"):
+        filter_results([], filter_name="Unknown")

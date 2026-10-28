@@ -11,6 +11,15 @@ DEFAULT_TIMEOUT = 8.0
 MAX_TITLE_LENGTH = 200
 MAX_HTML_BYTES = 64 * 1024
 
+DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; SubdomainLiveChecker/0.2.1; "
+        "+https://github.com/)"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
+
 TAKEOVER_SIGNATURES = {
     "NoSuchBucket": "AWS S3 Bucket",
     "The specified bucket does not exist": "AWS S3 Bucket",
@@ -58,14 +67,32 @@ def detect_takeover(html: str) -> str | None:
     return None
 
 
+def _build_timeout(timeout: float) -> httpx.Timeout:
+    """httpx timeout is per-phase, not total. Apply to every phase."""
+    return httpx.Timeout(
+        connect=timeout,
+        read=timeout,
+        write=timeout,
+        pool=timeout,
+    )
 
-def check_subdomain(hostname: str, timeout: float = DEFAULT_TIMEOUT) -> SubdomainResult:
+
+def check_subdomain(
+    hostname: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    verify: bool = True,
+) -> SubdomainResult:
     url = f"https://{hostname}/"
     started_at = time.perf_counter()
 
     try:
         with httpx.stream(
-            "GET", url, timeout=timeout, follow_redirects=True
+            "GET",
+            url,
+            timeout=_build_timeout(timeout),
+            follow_redirects=True,
+            headers=DEFAULT_HEADERS,
+            verify=verify,
         ) as response:
             body = bytearray()
 
@@ -127,7 +154,6 @@ def check_subdomain(hostname: str, timeout: float = DEFAULT_TIMEOUT) -> Subdomai
         )
 
 
-
 def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 1)
 
@@ -136,7 +162,9 @@ ProgressCallback = Callable[[int, int], None]
 
 
 def check_subdomains(
-    hostnames: list[str], on_progress: ProgressCallback | None = None
+    hostnames: list[str],
+    on_progress: ProgressCallback | None = None,
+    max_workers: int = 20,
 ) -> list[SubdomainResult]:
     if not hostnames:
         return []
@@ -145,7 +173,7 @@ def check_subdomains(
     total = len(unique_hostnames)
     results_by_hostname: dict[str, SubdomainResult] = {}
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_subdomain, host): host for host in unique_hostnames}
         for future in as_completed(futures):
             hostname = futures[future]

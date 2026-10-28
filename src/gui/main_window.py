@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 from src.checker import check_subdomains
 from src.database import (
     DB_PATH,
+    DatabaseError,
     calculate_diff,
     get_previous_results,
     init_db,
@@ -34,6 +36,32 @@ from src.export import build_csv, build_html
 from src.gui.filtering import filter_results
 from src.gui.workers import Worker
 from src.models import ResultStatus, SubdomainResult
+
+ADMIN_KEYWORDS = (
+    "admin",
+    "panel",
+    "login",
+    "dashboard",
+    "jenkins",
+    "gitlab",
+    "jira",
+    "grafana",
+)
+
+
+def normalize_domain_input(raw: str) -> str:
+    """Strip scheme, path, trailing dot and lowercase a user-supplied domain."""
+    domain = raw.strip().lower()
+
+    for prefix in ("https://", "http://"):
+        if domain.startswith(prefix):
+            domain = domain[len(prefix):]
+            break
+
+    domain = domain.split("/", 1)[0]
+    domain = domain.split("?", 1)[0]
+    domain = domain.rstrip(".")
+    return domain
 
 
 class MainWindow(QMainWindow):
@@ -46,7 +74,7 @@ class MainWindow(QMainWindow):
         self.thread_pool = QThreadPool.globalInstance()
         self.active_workers: set[Worker] = set()
         self.current_domain = ""
-        self.current_results = []
+        self.current_results: list[SubdomainResult] = []
 
         self._build_ui()
         self._apply_styles()
@@ -65,10 +93,13 @@ class MainWindow(QMainWindow):
 
     # ---------- flow ----------
     def _start_scan(self) -> None:
-        self.current_domain = self.target_input.text().strip()
-        if not self.current_domain:
+        domain = normalize_domain_input(self.target_input.text())
+        if not domain:
             self.status_label.setText("Enter a target domain")
             return
+
+        self.current_domain = domain
+        self.target_input.setText(domain)
 
         self.scan_button.setEnabled(False)
         self.progress_bar.setVisible(False)
@@ -125,7 +156,16 @@ class MainWindow(QMainWindow):
     def _handle_check_result(self, results: list) -> None:
         self.progress_bar.setVisible(False)
 
-        previous_data = get_previous_results(self.current_domain)
+        if not results:
+            self.status_label.setText("No hosts responded.")
+            self.scan_button.setEnabled(True)
+            return
+
+        try:
+            previous_data = get_previous_results(self.current_domain)
+        except DatabaseError as exc:
+            QMessageBox.warning(self, "History unavailable", str(exc))
+            previous_data = {}
 
         current_data = {
             r.hostname: {
@@ -154,7 +194,10 @@ class MainWindow(QMainWindow):
             r.is_new = r.hostname in diff["new"]
             r.status_changed = r.hostname in diff["changed"]
 
-        save_results(self.current_domain, results)
+        try:
+            save_results(self.current_domain, results)
+        except DatabaseError as exc:
+            QMessageBox.warning(self, "History not saved", str(exc))
 
         counts = Counter((r.status.value if r.status else "unknown") for r in results)
         live = (
@@ -182,81 +225,98 @@ class MainWindow(QMainWindow):
         self._apply_filters()
         self.scan_button.setEnabled(True)
 
-
     def _apply_filters(self, *_args) -> None:
-        filtered_results = filter_results(
-            self.current_results,
-            filter_name=self.filter_combo.currentText(),
-            query=self.search_input.text(),
-        )
+        try:
+            filtered_results = filter_results(
+                self.current_results,
+                filter_name=self.filter_combo.currentText(),
+                query=self.search_input.text(),
+            )
+        except ValueError as exc:
+            self.status_label.setText(f"Filter error: {exc}")
+            return
         self._populate_table(filtered_results)
-    
+
     def _populate_table(self, results: list) -> None:
-        self.results_table.setRowCount(len(results))
-        for row, r in enumerate(results):
-            if r.is_removed:
-                status_item = QTableWidgetItem("REMOVED")
-                status_item.setForeground(QColor("#888888"))
+        self.results_table.setUpdatesEnabled(False)
+        try:
+            self.results_table.setRowCount(len(results))
+            for row, r in enumerate(results):
+                if r.is_removed:
+                    status_item = QTableWidgetItem("REMOVED")
+                    status_item.setForeground(QColor("#888888"))
 
-                self.results_table.setItem(row, 0, QTableWidgetItem(r.hostname))
-                self.results_table.setItem(row, 1, status_item)
-                self.results_table.setItem(row, 2, QTableWidgetItem("-"))
-                self.results_table.setItem(row, 3, QTableWidgetItem("-"))
-                self.results_table.setItem(
-                    row,
-                    4,
-                    QTableWidgetItem(r.error or "Was present in previous scan"),
-                )
+                    self.results_table.setItem(row, 0, QTableWidgetItem(r.hostname))
+                    self.results_table.setItem(row, 1, status_item)
+                    self.results_table.setItem(row, 2, QTableWidgetItem("-"))
+                    self.results_table.setItem(row, 3, QTableWidgetItem("-"))
+                    self.results_table.setItem(
+                        row,
+                        4,
+                        QTableWidgetItem(r.error or "Was present in previous scan"),
+                    )
 
-                for col in range(5):
-                    item = self.results_table.item(row, col)
-                    if item is not None:
-                        item.setForeground(QColor("#888888"))
+                    for col in range(5):
+                        item = self.results_table.item(row, col)
+                        if item is not None:
+                            item.setForeground(QColor("#888888"))
 
-                continue
-            code_str = str(r.status_code) if r.status_code is not None else "-"
-            time_str = f"{r.response_time_ms:.1f}" if r.response_time_ms is not None else "-"
-            status_str = r.status.value if r.status else "-"
+                    continue
+                code_str = str(r.status_code) if r.status_code is not None else "-"
+                time_str = f"{r.response_time_ms:.1f}" if r.response_time_ms is not None else "-"
+                status_str = r.status.value if r.status else "-"
 
-            host_item = QTableWidgetItem(r.hostname)
-            status_item = QTableWidgetItem(status_str)
-            code_item = QTableWidgetItem(code_str)
-            time_item = QTableWidgetItem(time_str)
+                host_item = QTableWidgetItem(r.hostname)
+                status_item = QTableWidgetItem(status_str)
+                code_item = QTableWidgetItem(code_str)
+                time_item = QTableWidgetItem(time_str)
 
-            extra = r.title or r.error or "-"
-            if r.takeover:
-                extra = f"⚠️ Potential Takeover: {r.takeover}"
-            extra_item = QTableWidgetItem(extra)
+                extra = r.title or r.error or "-"
+                if r.takeover:
+                    extra = f"⚠️ Potential Takeover: {r.takeover}"
+                extra_item = QTableWidgetItem(extra)
 
-            bg_color = None
-            fg_color = QColor("#e2e8f0")
+                bg_color = None
+                fg_color = QColor("#e2e8f0")
 
-            if r.takeover:
-                bg_color = QColor("#7f1d1d")
-                fg_color = QColor("#fecaca")
-            elif r.is_new:
-                bg_color = QColor("#064e3b")
-                fg_color = QColor("#d1fae5")
-            elif r.status_changed:
-                bg_color = QColor("#78350f")
-                fg_color = QColor("#fef3c7")
-            elif r.status_code in (401, 403):
-                bg_color = QColor("#312e81")
-                fg_color = QColor("#e0e7ff")
-            elif (
-                r.status == ResultStatus.LIVE
-                and r.title
-                and any(k in r.title.lower() for k in ["admin", "panel", "login", "dashboard"])
-            ):
-                bg_color = QColor("#4c1d95")
-                fg_color = QColor("#ede9fe")
+                if r.takeover:
+                    bg_color = QColor("#7f1d1d")
+                    fg_color = QColor("#fecaca")
+                elif r.is_new:
+                    bg_color = QColor("#064e3b")
+                    fg_color = QColor("#d1fae5")
+                elif r.status_changed:
+                    bg_color = QColor("#78350f")
+                    fg_color = QColor("#fef3c7")
+                elif r.status_code in (401, 403):
+                    bg_color = QColor("#312e81")
+                    fg_color = QColor("#e0e7ff")
+                elif r.status == ResultStatus.LIVE and self._looks_like_admin(r):
+                    bg_color = QColor("#4c1d95")
+                    fg_color = QColor("#ede9fe")
 
-            items = [host_item, status_item, code_item, time_item, extra_item]
-            for col, item in enumerate(items):
-                if bg_color:
-                    item.setBackground(bg_color)
-                item.setForeground(fg_color)
-                self.results_table.setItem(row, col, item)
+                items = [host_item, status_item, code_item, time_item, extra_item]
+                for col, item in enumerate(items):
+                    if bg_color:
+                        item.setBackground(bg_color)
+                    item.setForeground(fg_color)
+                    self.results_table.setItem(row, col, item)
+        finally:
+            self.results_table.setUpdatesEnabled(True)
+
+    @staticmethod
+    def _looks_like_admin(result: SubdomainResult) -> bool:
+        haystack = " ".join(
+            filter(
+                None,
+                [
+                    result.title or "",
+                    result.final_url or "",
+                    result.hostname or "",
+                ],
+            )
+        ).lower()
+        return any(keyword in haystack for keyword in ADMIN_KEYWORDS)
 
     def _handle_discovery_error(self, error: str) -> None:
         self.progress_bar.setVisible(False)
@@ -279,11 +339,23 @@ class MainWindow(QMainWindow):
             self.issues_value.setText(str(issues))
 
     def _clear_history(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Clear scan history?",
+            "This will remove all saved scans. "
+            "The next scan will mark all subdomains as NEW.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
         if os.path.exists(DB_PATH):
             os.remove(DB_PATH)
-            init_db()
-        self.status_label.setText("History cleared. Next scan will mark all subdomains as NEW.")
-
+        init_db()
+        self.status_label.setText(
+            "History cleared. Next scan will mark all subdomains as NEW."
+        )
 
     def _export_csv(self) -> None:
         if not self.current_results:
@@ -298,11 +370,11 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
-        with open(file_path, "w", newline="", encoding="utf-8") as f:
-            f.write(build_csv(self.current_results))
-
-
-
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8") as f:
+                f.write(build_csv(self.current_results))
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", f"Could not write file: {exc}")
 
     def _export_html(self) -> None:
         if not self.current_results:
@@ -317,9 +389,11 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(build_html(self.current_results, self.current_domain))
-
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(build_html(self.current_results, self.current_domain))
+        except OSError as exc:
+            QMessageBox.critical(self, "Export failed", f"Could not write file: {exc}")
 
     def _build_ui(self) -> None:
         central_widget = QWidget()
@@ -348,7 +422,7 @@ class MainWindow(QMainWindow):
         subtitle.setObjectName("sidebarTitle")
         description = QLabel("Passive discovery\nand low-impact\nHTTP checks.")
         description.setObjectName("sidebarDescription")
-        version = QLabel("v0.2.1 - Inteligence")
+        version = QLabel("v0.2.1 - Intelligence")
         version.setObjectName("version")
 
         layout.addWidget(logo)
@@ -486,7 +560,7 @@ class MainWindow(QMainWindow):
         filter_row.setSpacing(12)
         filter_row.addWidget(self.search_input, 1)
         filter_row.addWidget(self.filter_combo)
-        
+
         self.results_table = QTableWidget()
         self.results_table.setObjectName("resultsTable")
         self.results_table.setColumnCount(5)
@@ -507,10 +581,10 @@ class MainWindow(QMainWindow):
         self.results_table.setVisible(False)
 
         legend_label = QLabel(
-    "Легенда: 🟩 Новый поддомен   |   🟨 Изменился статус\n"
-    "🟥 Индикатор Takeover   |   🟦 401/403 (Доступ закрыт)\n"
-    "🟪 Админ-панель"
-)
+            "Legend: 🟩 New subdomain   |   🟨 Status changed\n"
+            "🟥 Takeover indicator   |   🟦 401/403 (Access denied)\n"
+            "🟪 Admin-like panel"
+        )
         legend_label.setObjectName("legendLabel")
         legend_label.setVisible(False)
         self.legend = legend_label

@@ -5,6 +5,7 @@ from src.discovery import (
     limit_hostnames,
 )
 from src.discovery_aggregator import aggregate_discovery
+from src.discovery_models import DiscoverySourceResult
 
 
 def get_discovery_sources() -> list:
@@ -17,7 +18,7 @@ def get_discovery_sources() -> list:
 
 def discover_from_all_sources(
     domain: str,
-):
+) -> tuple[list[str], list[DiscoverySourceResult]]:
     """Run all configured passive discovery sources."""
     hostnames, results = aggregate_discovery(
         domain,

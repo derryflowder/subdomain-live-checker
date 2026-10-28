@@ -1,4 +1,3 @@
-
 import csv
 from io import StringIO
 
@@ -47,6 +46,9 @@ def test_build_csv_contains_headers_and_result_flags() -> None:
         "New",
         "Changed",
         "Removed",
+        "Final URL",
+        "Content-Type",
+        "Server",
     ]
 
     assert rows[1][0] == "www.example.com"
@@ -54,6 +56,23 @@ def test_build_csv_contains_headers_and_result_flags() -> None:
     assert rows[2][6] == "Yes"
     assert rows[3][8] == "Yes"
     assert rows[4][5] == "Example cloud service"
+
+
+def test_build_csv_escapes_injection_payloads() -> None:
+    result = SubdomainResult(
+        hostname="evil.example.com",
+        status=ResultStatus.LIVE,
+        title="=cmd|' /C calc'!A0",
+        takeover="+SUM(1,2)",
+        server="-malicious",
+    )
+
+    rows = list(csv.reader(StringIO(build_csv([result]))))
+    row = rows[1]
+
+    assert row[4] == "=cmd|' /C calc'!A0".replace("=", "'=", 1) or row[4].startswith("'")
+    assert row[5].startswith("'")
+    assert row[11].startswith("'")
 
 
 def test_build_html_contains_removed_and_takeover_rows() -> None:
