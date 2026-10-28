@@ -6,3 +6,5 @@ __pycache__/
 .env
 
 results.json
+ruff_report.txt
+scan_history.db
