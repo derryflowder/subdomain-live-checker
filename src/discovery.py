@@ -33,6 +33,12 @@ def fetch_certificate_names(domain: str) -> list[str]:
             )
 
         records = response.json()
+
+    except httpx.TimeoutException as exc:
+        raise DiscoveryError(
+            "Certificate discovery timed out. The certificate source may be "
+            "temporarily unavailable."
+        ) from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise DiscoveryError(f"Certificate discovery failed: {exc}") from exc
 
