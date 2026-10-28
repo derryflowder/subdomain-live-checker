@@ -65,7 +65,7 @@ def test_fetch_certificate_names_raises_discovery_error(monkeypatch) -> None:
     try:
         fetch_certificate_names("example.com")
     except DiscoveryError as exc:
-        assert "Certificate discovery failed" in str(exc)
+        assert "Certificate discovery returned HTTP 503" in str(exc)
     else:
         raise AssertionError("DiscoveryError was not raised")
 

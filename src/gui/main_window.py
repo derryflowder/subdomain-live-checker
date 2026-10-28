@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.checker import check_subdomains
+from src.discovery import discover_subdomains
 from src.gui.workers import Worker
 
 
@@ -25,6 +27,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 650)
 
         self.thread_pool = QThreadPool.globalInstance()
+        self.discovered_subdomains: list[str] = []
 
         self._build_ui()
         self._apply_styles()
@@ -32,13 +35,49 @@ class MainWindow(QMainWindow):
     def _demo_scan(self) -> str:
         return "Worker is working"
 
+    def _run_discovery(self) -> list[str]:
+        return discover_subdomains(self.target_input.text().strip())
+
+    def _run_checks(self) -> list:
+        return check_subdomains(self.discovered_subdomains)
+
     def _start_scan(self) -> None:
-        worker = Worker(self._demo_scan)
+        worker = Worker(self._run_discovery)
         worker.signals.result.connect(self._handle_scan_result)
+        worker.signals.error.connect(self._handle_scan_error)
         self.thread_pool.start(worker)
 
-    def _handle_scan_result(self, result: str) -> None:
-        self.status_label.setText(result)
+    def _handle_scan_result(self, result: list[str]) -> None:
+        self.discovered_subdomains = result
+
+        if not result:
+            self.status_label.setText("No subdomains discovered")
+            return
+
+        preview = ", ".join(result[:3])
+        self.status_label.setText(
+            f"Discovered {len(result)} subdomains: {preview}"
+        )
+
+        worker = Worker(self._run_checks)
+        worker.signals.result.connect(self._handle_check_result)
+        worker.signals.error.connect(self._handle_scan_error)
+        self.thread_pool.start(worker)
+
+    def _handle_check_result(self, results: list) -> None:
+        live_count = sum(
+            1
+            for result in results
+            if result.status is not None
+            and result.status.value in {"live", "redirect", "forbidden"}
+        )
+
+        self.status_label.setText(
+            f"Checked {len(results)} subdomains | Reachable: {live_count}"
+        )
+
+    def _handle_scan_error(self, error: str) -> None:
+        self.status_label.setText(f"Discovery error: {error}")
 
     def _build_ui(self) -> None:
         central_widget = QWidget()

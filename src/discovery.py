@@ -26,7 +26,12 @@ def fetch_certificate_names(domain: str) -> list[str]:
             params={"q": f"%.{domain}", "output": "json"},
             timeout=10.0,
         )
-        response.raise_for_status()
+
+        if response.status_code >= 400:
+            raise DiscoveryError(
+                f"Certificate discovery returned HTTP {response.status_code}."
+            )
+
         records = response.json()
     except (httpx.HTTPError, ValueError) as exc:
         raise DiscoveryError(f"Certificate discovery failed: {exc}") from exc
@@ -52,7 +57,11 @@ def discover_subdomains(domain: str) -> list[str]:
     suffix = f".{normalized_domain}"
 
     return sorted(
-        hostname
-        for hostname in certificate_names
-        if hostname.endswith(suffix) and hostname != normalized_domain
+    hostname
+    for hostname in certificate_names
+    if (
+        hostname.endswith(suffix)
+        and hostname != normalized_domain
+        and "*" not in hostname
     )
+)
