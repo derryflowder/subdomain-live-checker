@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.gui.workers import Worker
+
 
 class MainWindow(QMainWindow):
     """Main application window."""
@@ -22,8 +24,21 @@ class MainWindow(QMainWindow):
         self.resize(1280, 760)
         self.setMinimumSize(1000, 650)
 
+        self.thread_pool = QThreadPool.globalInstance()
+
         self._build_ui()
         self._apply_styles()
+
+    def _demo_scan(self) -> str:
+        return "Worker is working"
+
+    def _start_scan(self) -> None:
+        worker = Worker(self._demo_scan)
+        worker.signals.result.connect(self._handle_scan_result)
+        self.thread_pool.start(worker)
+
+    def _handle_scan_result(self, result: str) -> None:
+        self.status_label.setText(result)
 
     def _build_ui(self) -> None:
         central_widget = QWidget()
@@ -165,6 +180,7 @@ class MainWindow(QMainWindow):
         self.scan_button.setObjectName("scanButton")
         self.scan_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.scan_button.setMinimumSize(120, 48)
+        self.scan_button.clicked.connect(self._start_scan)
 
         input_row.addWidget(self.target_input, 1)
         input_row.addWidget(self.scan_button)
