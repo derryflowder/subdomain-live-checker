@@ -13,7 +13,7 @@ class DatabaseError(Exception):
 
 
 def init_db():
-    """Создает таблицы истории сканирования, если их еще нет."""
+    """Creates scan history tables if they do not already exist."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS scans (
@@ -38,7 +38,7 @@ def init_db():
 
 
 def get_previous_results(domain: str) -> dict[str, dict]:
-    """Возвращает результаты последнего завершенного скана домена."""
+    """Returns the results of the last completed domain scan."""
     init_db()
 
     try:
@@ -69,7 +69,7 @@ def get_previous_results(domain: str) -> dict[str, dict]:
 
 
 def save_results(domain: str, results: list[SubdomainResult]):
-    """Создает новый скан и сохраняет его результаты."""
+    """Creates a new scan and saves its results."""
     init_db()
 
     try:
@@ -116,7 +116,7 @@ def calculate_diff(
     previous: dict[str, dict],
     current: dict[str, dict],
 ) -> dict[str, set[str]]:
-    """Сравнивает два скана и возвращает NEW, CHANGED и REMOVED."""
+    """Compares two scans and returns NEW, CHANGED and REMOVED."""
     previous_hosts = set(previous)
     current_hosts = set(current)
 
