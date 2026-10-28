@@ -4,6 +4,34 @@ from src.checker import check_subdomain, check_subdomains, classify_status, extr
 from src.models import ResultStatus, SubdomainResult
 
 
+class FakeStreamResponse:
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self.status_code = response.status_code
+        self.history = response.history
+        self.url = response.url
+        self.headers = response.headers
+        self.encoding = response.encoding
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> None:
+        self._response.close()
+
+    def iter_bytes(self, chunk_size: int = 8192):
+        yield from self._response.iter_bytes(chunk_size=chunk_size)
+
+
+def mock_stream(monkeypatch, response: httpx.Response) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        lambda *args, **kwargs: FakeStreamResponse(response),
+    )
+
+
+
 def test_subdomain_result_stores_http_data() -> None:
     result = SubdomainResult(
         hostname="api.example.com",
@@ -52,9 +80,10 @@ def test_extract_title_returns_none_when_missing() -> None:
     assert extract_title("<html><body>Hello</body></html>") is None
 
 
+
+
 def test_check_subdomain_limits_html_for_title(monkeypatch) -> None:
     request = httpx.Request("GET", "https://example.com/")
-
     html = "A" * 65536 + "<title>Too Late</title>"
 
     response = httpx.Response(
@@ -64,14 +93,13 @@ def test_check_subdomain_limits_html_for_title(monkeypatch) -> None:
         request=request,
     )
 
-    def fake_get(*args, **kwargs):
-        return response
-
-    monkeypatch.setattr(httpx, "get", fake_get)
+    mock_stream(monkeypatch, response)
 
     result = check_subdomain("example.com")
 
     assert result.title is None
+
+
 
 
 def test_check_subdomain_collects_http_data(monkeypatch) -> None:
@@ -87,10 +115,7 @@ def test_check_subdomain_collects_http_data(monkeypatch) -> None:
         request=request,
     )
 
-    def fake_get(*args, **kwargs):
-        return response
-
-    monkeypatch.setattr(httpx, "get", fake_get)
+    mock_stream(monkeypatch, response)
 
     result = check_subdomain("api.example.com")
 
@@ -122,10 +147,7 @@ def test_check_subdomain_detects_redirect_history(monkeypatch) -> None:
         history=[redirect_response],
     )
 
-    def fake_get(*args, **kwargs):
-        return response
-
-    monkeypatch.setattr(httpx, "get", fake_get)
+    mock_stream(monkeypatch, response)
 
     result = check_subdomain("example.com")
 
@@ -134,11 +156,12 @@ def test_check_subdomain_detects_redirect_history(monkeypatch) -> None:
     assert result.final_url == "https://www.example.com/"
 
 
+
 def test_check_subdomain_handles_timeout(monkeypatch) -> None:
-    def fake_get(*args, **kwargs):
+    def fake_stream(*args, **kwargs):
         raise httpx.TimeoutException("request timed out")
 
-    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "stream", fake_stream)
 
     result = check_subdomain("slow.example.com")
 
@@ -148,11 +171,13 @@ def test_check_subdomain_handles_timeout(monkeypatch) -> None:
     assert result.response_time_ms is not None
 
 
+
+
 def test_check_subdomain_handles_connection_error(monkeypatch) -> None:
-    def fake_get(*args, **kwargs):
+    def fake_stream(*args, **kwargs):
         raise httpx.ConnectError("connection failed")
 
-    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "stream", fake_stream)
 
     result = check_subdomain("offline.example.com")
 
@@ -160,6 +185,7 @@ def test_check_subdomain_handles_connection_error(monkeypatch) -> None:
     assert result.status_code is None
     assert result.error == "connection error"
     assert result.response_time_ms is not None
+
 
 
 def test_classify_status() -> None:

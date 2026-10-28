@@ -58,12 +58,45 @@ def detect_takeover(html: str) -> str | None:
     return None
 
 
+
 def check_subdomain(hostname: str, timeout: float = DEFAULT_TIMEOUT) -> SubdomainResult:
     url = f"https://{hostname}/"
     started_at = time.perf_counter()
 
     try:
-        response = httpx.get(url, timeout=timeout, follow_redirects=True)
+        with httpx.stream(
+            "GET", url, timeout=timeout, follow_redirects=True
+        ) as response:
+            body = bytearray()
+
+            for chunk in response.iter_bytes(chunk_size=8192):
+                remaining = MAX_HTML_BYTES - len(body)
+                body.extend(chunk[:remaining])
+
+                if len(body) >= MAX_HTML_BYTES:
+                    break
+
+            encoding = response.encoding or "utf-8"
+            text_sample = body.decode(encoding, errors="replace")
+
+            response_time_ms = _elapsed_ms(started_at)
+
+            return SubdomainResult(
+                hostname=hostname,
+                status=(
+                    ResultStatus.REDIRECT
+                    if response.history
+                    else classify_status(response.status_code)
+                ),
+                status_code=response.status_code,
+                response_time_ms=response_time_ms,
+                final_url=str(response.url),
+                content_type=response.headers.get("content-type"),
+                server=response.headers.get("server"),
+                title=extract_title(text_sample),
+                takeover=detect_takeover(text_sample),
+            )
+
     except httpx.TimeoutException:
         return SubdomainResult(
             hostname=hostname,
@@ -93,22 +126,6 @@ def check_subdomain(hostname: str, timeout: float = DEFAULT_TIMEOUT) -> Subdomai
             error=f"Unexpected error: {exc}",
         )
 
-    response_time_ms = _elapsed_ms(started_at)
-    text_sample = response.text[:MAX_HTML_BYTES]
-
-    return SubdomainResult(
-        hostname=hostname,
-        status=(
-            ResultStatus.REDIRECT if response.history else classify_status(response.status_code)
-        ),
-        status_code=response.status_code,
-        response_time_ms=response_time_ms,
-        final_url=str(response.url),
-        content_type=response.headers.get("content-type"),
-        server=response.headers.get("server"),
-        title=extract_title(text_sample),
-        takeover=detect_takeover(text_sample),
-    )
 
 
 def _elapsed_ms(started_at: float) -> float:
