@@ -1,12 +1,10 @@
-import csv
-import html
 import os
 from collections import Counter
-from datetime import datetime
 
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -32,8 +30,10 @@ from src.database import (
     save_results,
 )
 from src.discovery_sources import discover_from_all_sources
+from src.export import build_csv, build_html
+from src.gui.filtering import filter_results
 from src.gui.workers import Worker
-from src.models import ResultStatus
+from src.models import ResultStatus, SubdomainResult
 
 
 class MainWindow(QMainWindow):
@@ -124,7 +124,6 @@ class MainWindow(QMainWindow):
 
     def _handle_check_result(self, results: list) -> None:
         self.progress_bar.setVisible(False)
-        self.current_results = results
 
         previous_data = get_previous_results(self.current_domain)
 
@@ -139,6 +138,18 @@ class MainWindow(QMainWindow):
 
         diff = calculate_diff(previous_data, current_data)
 
+        removed_results = [
+            SubdomainResult(
+                hostname=hostname,
+                is_removed=True,
+                error="Was present in previous scan",
+            )
+            for hostname in sorted(diff["removed"])
+        ]
+
+        display_results = results + removed_results
+        self.current_results = display_results
+
         for r in results:
             r.is_new = r.hostname in diff["new"]
             r.status_changed = r.hostname in diff["changed"]
@@ -146,7 +157,11 @@ class MainWindow(QMainWindow):
         save_results(self.current_domain, results)
 
         counts = Counter((r.status.value if r.status else "unknown") for r in results)
-        live = counts.get("live", 0) + counts.get("redirect", 0) + counts.get("forbidden", 0)
+        live = (
+            counts.get("live", 0)
+            + counts.get("redirect", 0)
+            + counts.get("forbidden", 0)
+        )
         issues = len(results) - live
         takeovers = sum(1 for r in results if r.takeover)
 
@@ -158,17 +173,47 @@ class MainWindow(QMainWindow):
             f" | Changed: {len(diff['changed'])}"
             f" | Removed: {len(diff['removed'])}"
         )
+
         if takeovers > 0:
             status_text += f" | ⚠️ Potential Takeovers: {takeovers}"
+
         self.status_label.setText(status_text)
 
-        self._populate_table(results)
+        self._apply_filters()
         self.scan_button.setEnabled(True)
 
+
+    def _apply_filters(self, *_args) -> None:
+        filtered_results = filter_results(
+            self.current_results,
+            filter_name=self.filter_combo.currentText(),
+            query=self.search_input.text(),
+        )
+        self._populate_table(filtered_results)
+    
     def _populate_table(self, results: list) -> None:
         self.results_table.setRowCount(len(results))
         for row, r in enumerate(results):
-            # Жесткая проверка на None для чисел
+            if r.is_removed:
+                status_item = QTableWidgetItem("REMOVED")
+                status_item.setForeground(QColor("#888888"))
+
+                self.results_table.setItem(row, 0, QTableWidgetItem(r.hostname))
+                self.results_table.setItem(row, 1, status_item)
+                self.results_table.setItem(row, 2, QTableWidgetItem("-"))
+                self.results_table.setItem(row, 3, QTableWidgetItem("-"))
+                self.results_table.setItem(
+                    row,
+                    4,
+                    QTableWidgetItem(r.error or "Was present in previous scan"),
+                )
+
+                for col in range(5):
+                    item = self.results_table.item(row, col)
+                    if item is not None:
+                        item.setForeground(QColor("#888888"))
+
+                continue
             code_str = str(r.status_code) if r.status_code is not None else "-"
             time_str = f"{r.response_time_ms:.1f}" if r.response_time_ms is not None else "-"
             status_str = r.status.value if r.status else "-"
@@ -239,107 +284,43 @@ class MainWindow(QMainWindow):
             init_db()
         self.status_label.setText("History cleared. Next scan will mark all subdomains as NEW.")
 
-    # ---------- Export ----------
+
     def _export_csv(self) -> None:
         if not self.current_results:
             return
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save CSV", f"{self.current_domain}_scan.csv", "CSV Files (*.csv)"
+            self,
+            "Save CSV",
+            f"{self.current_domain}_scan.csv",
+            "CSV Files (*.csv)",
         )
         if not file_path:
             return
 
         with open(file_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "Hostname",
-                    "Status",
-                    "Code",
-                    "Time (ms)",
-                    "Title/Error",
-                    "Takeover Indicator",
-                    "New",
-                    "Changed",
-                ]
-            )
-            for r in self.current_results:
-                writer.writerow(
-                    [
-                        r.hostname,
-                        r.status.value if r.status else "",
-                        r.status_code if r.status_code is not None else "",
-                        r.response_time_ms if r.response_time_ms is not None else "",
-                        r.title or r.error or "",
-                        r.takeover or "",
-                        "Yes" if r.is_new else "No",
-                        "Yes" if r.status_changed else "No",
-                    ]
-                )
+            f.write(build_csv(self.current_results))
+
+
+
 
     def _export_html(self) -> None:
         if not self.current_results:
             return
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save HTML Report", f"{self.current_domain}_report.html", "HTML Files (*.html)"
+            self,
+            "Save HTML Report",
+            f"{self.current_domain}_report.html",
+            "HTML Files (*.html)",
         )
         if not file_path:
             return
 
-        # Защита от XSS
-        safe_domain = html.escape(self.current_domain)
-
-        html_content = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Report: {safe_domain}</title>
-<style>
-body {{ background: #0b0f14; color: #e2e8f0; font-family: sans-serif; padding: 20px; }}
-table {{ border-collapse: collapse; width: 100%; margin-top: 20px; }}
-th, td {{ border: 1px solid #202936; padding: 8px; text-align: left; }}
-th {{ background: #111720; color: #8996a8; }}
-.tr-new {{ background: #064e3b; color: #d1fae5; }}
-.tr-changed {{ background: #78350f; color: #fef3c7; }}
-.tr-takeover {{ background: #7f1d1d; color: #fecaca; }}
-.tr-auth {{ background: #312e81; color: #e0e7ff; }}
-</style></head><body>
-<h2>Subdomain Scan Report: {safe_domain}</h2>
-<p>Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-<table>
-<tr><th>Hostname</th><th>Status</th><th>Code</th><th>Time</th><th>Title/Error</th></tr>"""
-
-        for r in self.current_results:
-            row_class = ""
-            if r.takeover:
-                row_class = "tr-takeover"
-            elif r.is_new:
-                row_class = "tr-new"
-            elif r.status_changed:
-                row_class = "tr-changed"
-            elif r.status_code in (401, 403):
-                row_class = "tr-auth"
-
-            safe_hostname = html.escape(r.hostname)
-            safe_title = html.escape(r.title or r.error or "-")
-            if r.takeover:
-                safe_title = f"⚠️ Potential Takeover: {html.escape(r.takeover)}"
-
-            code_val = r.status_code if r.status_code is not None else "-"
-            time_val = f"{r.response_time_ms} ms" if r.response_time_ms is not None else "-"
-            status_val = r.status.value if r.status else "-"
-
-            html_content += f"""
-            <tr class="{row_class}">
-                <td>{safe_hostname}</td>
-                <td>{status_val}</td>
-                <td>{code_val}</td>
-                <td>{time_val}</td>
-                <td>{safe_title}</td>
-            </tr>"""
-
-        html_content += "</table></body></html>"
         with open(file_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
+            f.write(build_html(self.current_results, self.current_domain))
 
-    # ---------- UI ----------
+
     def _build_ui(self) -> None:
         central_widget = QWidget()
         central_widget.setObjectName("centralWidget")
@@ -480,6 +461,32 @@ th {{ background: #111720; color: #8996a8; }}
         status_layout.addWidget(self.progress_bar)
         status_layout.addWidget(self.status_label)
 
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("searchInput")
+        self.search_input.setPlaceholderText("Search hostname...")
+        self.search_input.setMinimumHeight(38)
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self._apply_filters)
+
+        self.filter_combo = QComboBox()
+        self.filter_combo.setObjectName("filterCombo")
+        self.filter_combo.addItems([
+            "All",
+            "Live",
+            "Issues",
+            "New",
+            "Changed",
+            "Removed",
+            "Takeover",
+        ])
+        self.filter_combo.setMinimumHeight(38)
+        self.filter_combo.currentTextChanged.connect(self._apply_filters)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(12)
+        filter_row.addWidget(self.search_input, 1)
+        filter_row.addWidget(self.filter_combo)
+        
         self.results_table = QTableWidget()
         self.results_table.setObjectName("resultsTable")
         self.results_table.setColumnCount(5)
@@ -512,6 +519,7 @@ th {{ background: #111720; color: #8996a8; }}
         layout.addWidget(description)
         layout.addWidget(target_frame)
         layout.addWidget(status_frame)
+        layout.addLayout(filter_row)
         layout.addWidget(self.results_table, 1)
         layout.addWidget(self.legend)
         return content
