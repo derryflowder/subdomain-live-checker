@@ -32,9 +32,7 @@ def fetch_certificate_names(domain: str) -> list[str]:
         )
 
         if response.status_code >= 400:
-            raise DiscoveryError(
-                f"Certificate discovery returned HTTP {response.status_code}."
-            )
+            raise DiscoveryError(f"Certificate discovery returned HTTP {response.status_code}.")
 
         records = response.json()
 
@@ -71,6 +69,7 @@ def discover_from_crtsh(domain: str) -> DiscoverySourceResult:
         hostnames=hostnames,
     )
 
+
 def filter_subdomains(hostnames: list[str], domain: str) -> list[str]:
     """Keep only valid subdomains of the target domain."""
     normalized_domain = normalize_hostname(domain)
@@ -79,14 +78,14 @@ def filter_subdomains(hostnames: list[str], domain: str) -> list[str]:
     return sorted(
         hostname
         for hostname in unique_hostnames(hostnames)
-        if hostname.endswith(suffix)
-        and hostname != normalized_domain
-        and "*" not in hostname
+        if hostname.endswith(suffix) and hostname != normalized_domain and "*" not in hostname
     )
+
 
 def limit_hostnames(hostnames: list[str]) -> list[str]:
     """Limit the number of discovered hostnames used by the checker."""
     return hostnames[:MAX_DISCOVERED_HOSTS]
+
 
 def discover_subdomains(domain: str) -> list[str]:
     """Discover subdomains belonging to the target domain."""

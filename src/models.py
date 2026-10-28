@@ -23,8 +23,8 @@ class SubdomainResult:
     server: str | None = None
     title: str | None = None
     error: str | None = None
-    
+
     # Новые поля для уникализации:
     takeover: str | None = None  # Название сервиса, если найден захват
-    is_new: bool = False         # Флаг: хост найден впервые
-    status_changed: bool = False # Флаг: статус изменился с прошлого раза
+    is_new: bool = False  # Флаг: хост найден впервые
+    status_changed: bool = False  # Флаг: статус изменился с прошлого раза

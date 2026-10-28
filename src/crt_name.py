@@ -19,24 +19,15 @@ def fetch_crt_name_names(domain: str) -> list[str]:
         )
 
         if response.status_code >= 400:
-            raise CrtNameDiscoveryError(
-                f"crt.name returned HTTP {response.status_code}."
-            )
+            raise CrtNameDiscoveryError(f"crt.name returned HTTP {response.status_code}.")
 
     except httpx.TimeoutException as exc:
-        raise CrtNameDiscoveryError(
-            "crt.name discovery timed out."
-        ) from exc
+        raise CrtNameDiscoveryError("crt.name discovery timed out.") from exc
     except httpx.HTTPError as exc:
-        raise CrtNameDiscoveryError(
-            f"crt.name discovery failed: {exc}"
-        ) from exc
+        raise CrtNameDiscoveryError(f"crt.name discovery failed: {exc}") from exc
 
-    return [
-        line.strip()
-        for line in response.text.splitlines()
-        if line.strip()
-    ]
+    return [line.strip() for line in response.text.splitlines() if line.strip()]
+
 
 def discover_from_crt_name(domain: str) -> DiscoverySourceResult:
     """Run crt.name discovery and return a standardized result."""
