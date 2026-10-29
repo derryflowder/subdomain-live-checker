@@ -1,7 +1,7 @@
 from collections import Counter
 
 from PySide6.QtCore import Qt, QThreadPool, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,8 +18,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QTableWidget,
-    QTableWidgetItem,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -34,8 +33,9 @@ from src.database import (
 from src.discovery_sources import discover_from_all_sources
 from src.export import build_csv, build_html
 from src.gui.filtering import filter_results
+from src.gui.table_model import SubdomainTableModel
 from src.gui.workers import Worker, WorkerSignals
-from src.models import ResultStatus, SubdomainResult
+from src.models import SubdomainResult
 from src.paths import DEFAULT_PATHS, MAX_PATHS
 
 
@@ -49,24 +49,6 @@ def normalize_domain_input(raw: str) -> str:
     domain = domain.split("?", 1)[0]
     domain = domain.rstrip(".")
     return domain
-
-
-class _SortableItem(QTableWidgetItem):
-    def __init__(self, text: str, sort_value=None) -> None:
-        super().__init__(text)
-        self._sort_value = text if sort_value is None else sort_value
-
-    def __lt__(self, other) -> bool:
-        other_key = getattr(other, "_sort_value", None)
-        if other_key is None:
-            try:
-                other_key = other.text()
-            except AttributeError:
-                return super().__lt__(other)
-        try:
-            return self._sort_value < other_key
-        except TypeError:
-            return str(self._sort_value) < str(other_key)
 
 
 class MainWindow(QMainWindow):
@@ -141,10 +123,10 @@ class MainWindow(QMainWindow):
         self.scan_button.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.progress_bar.setValue(0)
-        self.results_table.setRowCount(0)
         self.results_table.setVisible(False)
         self.legend.setVisible(False)
         self.findings_banner.setVisible(False)
+        self.table_model.set_results([])
 
         self._update_summary(discovered=0, live=0, issues=0)
         self.status_label.setText(
@@ -188,7 +170,6 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(len(hostnames))
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
-        self.results_table.setRowCount(0)
         self.results_table.setVisible(True)
         self.legend.setVisible(True)
 
@@ -313,144 +294,21 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.status_label.setText(f"Filter error: {exc}")
             return
-        self._populate_table(filtered_results)
 
-    def _populate_table(self, results: list) -> None:
-        self.results_table.setUpdatesEnabled(False)
-        was_sorting = self.results_table.isSortingEnabled()
-        self.results_table.setSortingEnabled(False)
-        try:
-            self.results_table.setRowCount(len(results))
-            for row, r in enumerate(results):
-                if r.is_removed:
-                    removed_items = [
-                        _SortableItem(r.hostname),
-                        _SortableItem("REMOVED", sort_value="zzz_removed"),
-                        _SortableItem("-", sort_value=-1),
-                        _SortableItem("-", sort_value=""),
-                        _SortableItem("-", sort_value=-1),
-                        _SortableItem("-", sort_value=-1.0),
-                        _SortableItem(
-                            r.error or "Was present in previous scan"
-                        ),
-                    ]
-                    for col, item in enumerate(removed_items):
-                        item.setForeground(QColor("#6b6b6b"))
-                        if col == 0:
-                            font = QFont()
-                            font.setItalic(True)
-                            item.setFont(font)
-                        self.results_table.setItem(row, col, item)
-                    continue
+        self.table_model.set_results(filtered_results)
 
-                code_str = (
-                    str(r.status_code) if r.status_code is not None else "-"
-                )
-                time_str = (
-                    f"{r.response_time_ms:.0f}"
-                    if r.response_time_ms is not None
-                    else "-"
-                )
-                status_str = r.status.value if r.status else "-"
-
-                tech_items = [t.display() for t in r.technologies]
-                if len(tech_items) > 3:
-                    tech_str = (
-                        ", ".join(tech_items[:3])
-                        + f" +{len(tech_items) - 3}"
-                    )
-                else:
-                    tech_str = ", ".join(tech_items) if tech_items else "-"
-
-                if r.findings:
-                    finding_str = f"{len(r.findings)} paths"
-                else:
-                    finding_str = "-"
-
-                extra = r.title or r.error or "-"
-                if r.takeover:
-                    extra = f"⚠️ Potential Takeover: {r.takeover}"
-
-                host_item = _SortableItem(r.hostname)
-                status_item = _SortableItem(status_str)
-                code_item = _SortableItem(
-                    code_str,
-                    sort_value=(
-                        r.status_code
-                        if r.status_code is not None
-                        else -1
-                    ),
-                )
-                tech_item = _SortableItem(
-                    tech_str, sort_value=len(r.technologies)
-                )
-                find_item = _SortableItem(
-                    finding_str, sort_value=len(r.findings)
-                )
-                time_item = _SortableItem(
-                    time_str,
-                    sort_value=(
-                        r.response_time_ms
-                        if r.response_time_ms is not None
-                        else -1.0
-                    ),
-                )
-                extra_item = _SortableItem(extra)
-
-                if r.findings:
-                    find_item.setToolTip(
-                        "\n".join(
-                            f"{f.path}  →  {f.status_code}"
-                            for f in r.findings
-                        )
-                    )
-                if r.technologies:
-                    tech_item.setToolTip(
-                        "\n".join(t.display() for t in r.technologies)
-                    )
-
-                status_fg = self._status_color(r.status, r.status_code)
-                status_item.setForeground(status_fg)
-
-                bg_color = None
-                if r.takeover:
-                    bg_color = QColor(239, 68, 68, 26)
-                elif r.is_new:
-                    bg_color = QColor(16, 185, 129, 16)
-                elif r.status_changed:
-                    bg_color = QColor(245, 158, 11, 16)
-                elif r.status_code in (401, 403):
-                    bg_color = QColor(96, 165, 250, 14)
-
-                items = [
-                    host_item,
-                    status_item,
-                    code_item,
-                    tech_item,
-                    find_item,
-                    time_item,
-                    extra_item,
-                ]
-                for col, item in enumerate(items):
-                    if bg_color is not None:
-                        item.setBackground(bg_color)
-                    if col != 1:
-                        item.setForeground(QColor("#e5e5e5"))
-                    self.results_table.setItem(row, col, item)
-        finally:
-            self.results_table.setUpdatesEnabled(True)
-            self.results_table.setSortingEnabled(was_sorting)
+        header = self.results_table.horizontalHeader()
+        sort_col = header.sortIndicatorSection()
+        if sort_col >= 0:
+            self.table_model.sort(sort_col, header.sortIndicatorOrder())
 
     def _on_table_context_menu(self, pos) -> None:
-        item = self.results_table.itemAt(pos)
-        if item is None:
+        index = self.results_table.indexAt(pos)
+        if not index.isValid():
             return
-        row = item.row()
-        host_item = self.results_table.item(row, 0)
-        if host_item is None:
-            return
-        hostname = host_item.text().strip()
-        if not hostname or hostname == "-":
+
+        result = self.table_model.get_result(index.row())
+        if result is None or result.is_removed:
             return
 
         menu = QMenu(self.results_table)
@@ -459,27 +317,9 @@ class MainWindow(QMainWindow):
 
         chosen = menu.exec(self.results_table.viewport().mapToGlobal(pos))
         if chosen == copy_action:
-            QApplication.clipboard().setText(hostname)
+            QApplication.clipboard().setText(result.hostname)
         elif chosen == open_action:
-            QDesktopServices.openUrl(QUrl(f"https://{hostname}/"))
-
-    @staticmethod
-    def _status_color(status, status_code: int | None) -> QColor:
-        if status == ResultStatus.LIVE:
-            return QColor("#10b981")
-        if status == ResultStatus.REDIRECT:
-            return QColor("#f59e0b")
-        if status == ResultStatus.FORBIDDEN:
-            return QColor("#f59e0b")
-        if status == ResultStatus.NOT_FOUND:
-            return QColor("#737373")
-        if status in (
-            ResultStatus.TIMEOUT,
-            ResultStatus.UNREACHABLE,
-            ResultStatus.ERROR,
-        ):
-            return QColor("#ef4444")
-        return QColor("#a3a3a3")
+            QDesktopServices.openUrl(QUrl(f"https://{result.hostname}/"))
 
     def _update_findings_banner(self, results: list) -> None:
         counter: Counter[str] = Counter()
@@ -614,7 +454,7 @@ class MainWindow(QMainWindow):
         brand = QLabel("SLC")
         brand.setObjectName("brand")
 
-        version = QLabel("v0.3.4")
+        version = QLabel("v0.4.0")
         version.setObjectName("version")
 
         row.addWidget(brand)
@@ -825,21 +665,12 @@ class MainWindow(QMainWindow):
         row.addWidget(self.filter_combo)
         return row
 
-    def _build_table(self) -> QTableWidget:
-        self.results_table = QTableWidget()
+    def _build_table(self) -> QTableView:
+        self.results_table = QTableView()
         self.results_table.setObjectName("resultsTable")
-        self.results_table.setColumnCount(7)
-        self.results_table.setHorizontalHeaderLabels(
-            [
-                "Hostname",
-                "Status",
-                "Code",
-                "Tech",
-                "Findings",
-                "Time",
-                "Title / Details",
-            ]
-        )
+
+        self.table_model = SubdomainTableModel(self)
+        self.results_table.setModel(self.table_model)
 
         hv = self.results_table.horizontalHeader()
         hv.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -851,10 +682,10 @@ class MainWindow(QMainWindow):
         hv.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
 
         self.results_table.setEditTriggers(
-            QTableWidget.EditTrigger.NoEditTriggers
+            QTableView.EditTrigger.NoEditTriggers
         )
         self.results_table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
+            QTableView.SelectionBehavior.SelectRows
         )
         self.results_table.verticalHeader().setVisible(False)
         self.results_table.setShowGrid(False)
@@ -1114,7 +945,7 @@ class MainWindow(QMainWindow):
                 outline: none;
             }
 
-            QTableWidget#resultsTable {
+            QTableView#resultsTable {
                 background: #0a0a0a;
                 color: #e5e5e5;
                 border: 1px solid #1f1f1f;
@@ -1125,7 +956,7 @@ class MainWindow(QMainWindow):
                 selection-color: #fafafa;
             }
 
-            QTableWidget#resultsTable::item {
+            QTableView#resultsTable::item {
                 padding: 10px 12px;
                 border-bottom: 1px solid #141414;
             }
