@@ -1,4 +1,3 @@
-import os
 from collections import Counter
 
 from PySide6.QtCore import Qt, QThreadPool, QUrl
@@ -27,12 +26,10 @@ from PySide6.QtWidgets import (
 
 from src.checker import check_subdomains
 from src.database import (
-    DB_PATH,
     DatabaseError,
+    ScanRepository,
+    SQLiteScanRepository,
     calculate_diff,
-    get_previous_results,
-    init_db,
-    save_results,
 )
 from src.discovery_sources import discover_from_all_sources
 from src.export import build_csv, build_html
@@ -73,12 +70,13 @@ class _SortableItem(QTableWidgetItem):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, repository: ScanRepository | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Subdomain Live Checker")
         self.resize(1320, 820)
         self.setMinimumSize(1040, 700)
 
+        self.repository = repository or SQLiteScanRepository()
         self.thread_pool = QThreadPool.globalInstance()
         self.active_workers: set[Worker] = set()
         self.current_domain = ""
@@ -224,7 +222,9 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            previous_data = get_previous_results(self.current_domain)
+            previous_data = self.repository.get_previous_results(
+                self.current_domain
+            )
         except DatabaseError as exc:
             QMessageBox.warning(
                 self,
@@ -268,7 +268,7 @@ class MainWindow(QMainWindow):
             r.status_changed = r.hostname in diff["changed"]
 
         try:
-            save_results(self.current_domain, results)
+            self.repository.save_results(self.current_domain, results)
         except DatabaseError as exc:
             QMessageBox.warning(self, "History not saved", str(exc))
 
@@ -541,9 +541,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-        init_db()
+        self.repository.clear_history()
         self.status_label.setText(
             "History cleared. Next scan will mark all subdomains as NEW."
         )
@@ -616,7 +614,7 @@ class MainWindow(QMainWindow):
         brand = QLabel("SLC")
         brand.setObjectName("brand")
 
-        version = QLabel("v0.3.3")
+        version = QLabel("v0.3.4")
         version.setObjectName("version")
 
         row.addWidget(brand)

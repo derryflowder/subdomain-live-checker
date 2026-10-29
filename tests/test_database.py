@@ -1,15 +1,15 @@
 import json
 import sqlite3
 
-import src.database as database
+from src.database import SQLiteScanRepository, calculate_diff
 from src.models import ResultStatus, SubdomainResult, TechDetection
 
 
-def test_init_db_creates_table(tmp_path, monkeypatch):
+def test_init_db_creates_table(tmp_path):
     db_path = tmp_path / "test.db"
-    monkeypatch.setattr(database, "DB_PATH", db_path)
+    repo = SQLiteScanRepository(db_path)
 
-    database.init_db()
+    repo.init_db()
 
     with sqlite3.connect(db_path) as conn:
         tables = conn.execute(
@@ -22,11 +22,11 @@ def test_init_db_creates_table(tmp_path, monkeypatch):
     assert tables == [("scan_results",), ("scans",)]
 
 
-def test_init_db_creates_index(tmp_path, monkeypatch):
+def test_init_db_creates_index(tmp_path):
     db_path = tmp_path / "test.db"
-    monkeypatch.setattr(database, "DB_PATH", db_path)
+    repo = SQLiteScanRepository(db_path)
 
-    database.init_db()
+    repo.init_db()
 
     with sqlite3.connect(db_path) as conn:
         indexes = conn.execute(
@@ -38,9 +38,9 @@ def test_init_db_creates_index(tmp_path, monkeypatch):
     assert indexes == [("idx_scan_results_scan_id",)]
 
 
-def test_save_and_get_previous_results(tmp_path, monkeypatch):
+def test_save_and_get_previous_results(tmp_path):
     db_path = tmp_path / "test.db"
-    monkeypatch.setattr(database, "DB_PATH", db_path)
+    repo = SQLiteScanRepository(db_path)
 
     results = [
         SubdomainResult(
@@ -55,9 +55,9 @@ def test_save_and_get_previous_results(tmp_path, monkeypatch):
         ),
     ]
 
-    database.save_results("example.com", results)
+    repo.save_results("example.com", results)
 
-    previous = database.get_previous_results("example.com")
+    previous = repo.get_previous_results("example.com")
 
     assert previous == {
         "api.example.com": {
@@ -77,9 +77,9 @@ def test_save_and_get_previous_results(tmp_path, monkeypatch):
     }
 
 
-def test_save_results_persists_tech(tmp_path, monkeypatch):
+def test_save_results_persists_tech(tmp_path):
     db_path = tmp_path / "test.db"
-    monkeypatch.setattr(database, "DB_PATH", db_path)
+    repo = SQLiteScanRepository(db_path)
 
     results = [
         SubdomainResult(
@@ -92,8 +92,8 @@ def test_save_results_persists_tech(tmp_path, monkeypatch):
         ),
     ]
 
-    database.save_results("example.com", results)
-    previous = database.get_previous_results("example.com")
+    repo.save_results("example.com", results)
+    previous = repo.get_previous_results("example.com")
 
     tech_list = json.loads(previous["api.example.com"]["tech"])
     assert len(tech_list) == 1
@@ -101,9 +101,9 @@ def test_save_results_persists_tech(tmp_path, monkeypatch):
     assert tech_list[0]["version"] == "1.24.0"
 
 
-def test_save_results_replaces_previous_state(tmp_path, monkeypatch):
+def test_save_results_replaces_previous_state(tmp_path):
     db_path = tmp_path / "test.db"
-    monkeypatch.setattr(database, "DB_PATH", db_path)
+    repo = SQLiteScanRepository(db_path)
 
     first_scan = [
         SubdomainResult(
@@ -121,18 +121,18 @@ def test_save_results_replaces_previous_state(tmp_path, monkeypatch):
         ),
     ]
 
-    database.save_results("example.com", first_scan)
-    database.save_results("example.com", second_scan)
+    repo.save_results("example.com", first_scan)
+    repo.save_results("example.com", second_scan)
 
-    previous = database.get_previous_results("example.com")
+    previous = repo.get_previous_results("example.com")
 
     assert "old.example.com" not in previous
     assert "new.example.com" in previous
 
 
-def test_save_results_keeps_scan_history(tmp_path, monkeypatch):
+def test_save_results_keeps_scan_history(tmp_path):
     db_path = tmp_path / "test.db"
-    monkeypatch.setattr(database, "DB_PATH", db_path)
+    repo = SQLiteScanRepository(db_path)
 
     first_scan = [
         SubdomainResult(
@@ -150,8 +150,8 @@ def test_save_results_keeps_scan_history(tmp_path, monkeypatch):
         ),
     ]
 
-    database.save_results("example.com", first_scan)
-    database.save_results("example.com", second_scan)
+    repo.save_results("example.com", first_scan)
+    repo.save_results("example.com", second_scan)
 
     with sqlite3.connect(db_path) as conn:
         scan_count = conn.execute(
@@ -211,7 +211,7 @@ def test_calculate_diff_detects_new_changed_and_removed():
         },
     }
 
-    diff = database.calculate_diff(previous, current)
+    diff = calculate_diff(previous, current)
 
     assert diff["new"] == {"new.example.com"}
     assert diff["changed"] == {"dev.example.com"}
@@ -236,7 +236,7 @@ def test_calculate_diff_detects_tech_change():
         },
     }
 
-    diff = database.calculate_diff(previous, current)
+    diff = calculate_diff(previous, current)
 
     assert diff["changed"] == {"api.example.com"}
     assert diff["new"] == set()
@@ -252,6 +252,6 @@ def test_calculate_diff_returns_empty_for_identical_scans():
         },
     }
 
-    diff = database.calculate_diff(scan, scan)
+    diff = calculate_diff(scan, scan)
 
     assert diff == {"new": set(), "changed": set(), "removed": set()}
