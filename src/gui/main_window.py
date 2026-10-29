@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         hostnames: list[str],
         paths,
         verify: bool,
+        trust_env: bool,
         on_progress,
     ) -> list:
         return check_subdomains(
@@ -109,6 +110,7 @@ class MainWindow(QMainWindow):
             on_progress=on_progress,
             paths=paths,
             verify=verify,
+            trust_env=trust_env,
         )
 
     def _parse_paths(self) -> list[str]:
@@ -174,6 +176,7 @@ class MainWindow(QMainWindow):
 
         paths = self._parse_paths()
         verify = not self.ignore_tls_check.isChecked()
+        trust_env = self.use_proxy_check.isChecked()
 
         self._update_summary(discovered=len(hostnames))
         phase_hint = (
@@ -197,6 +200,7 @@ class MainWindow(QMainWindow):
             hostnames,
             paths,
             verify,
+            trust_env,
             signals.progress.emit,
             _signals=signals,
         )
@@ -612,7 +616,7 @@ class MainWindow(QMainWindow):
         brand = QLabel("SLC")
         brand.setObjectName("brand")
 
-        version = QLabel("v0.3.2")
+        version = QLabel("v0.3.3")
         version.setObjectName("version")
 
         row.addWidget(brand)
@@ -671,6 +675,11 @@ class MainWindow(QMainWindow):
         self.ignore_tls_check.setObjectName("ghostCheckbox")
         self.ignore_tls_check.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        self.use_proxy_check = QCheckBox("Use system proxy")
+        self.use_proxy_check.setObjectName("ghostCheckbox")
+        self.use_proxy_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.use_proxy_check.setChecked(False)
+
         self.clear_btn = QPushButton("Clear history")
         self.clear_btn.setObjectName("ghostButton")
         self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -688,6 +697,7 @@ class MainWindow(QMainWindow):
 
         row.addWidget(self.paths_toggle)
         row.addWidget(self.ignore_tls_check)
+        row.addWidget(self.use_proxy_check)
         row.addWidget(self.clear_btn)
         row.addStretch()
         row.addWidget(self.export_csv_btn)

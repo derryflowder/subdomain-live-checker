@@ -218,6 +218,7 @@ def check_paths_for_result(
     paths: list[str],
     timeout: float = DEFAULT_PATHS_TIMEOUT,
     verify: bool = True,
+    trust_env: bool = True,
 ) -> None:
     if not paths or result.is_removed:
         return
@@ -234,6 +235,7 @@ def check_paths_for_result(
             follow_redirects=False,
             headers=_HEADERS,
             verify=verify,
+            trust_env=trust_env,
             limits=httpx.Limits(
                 max_keepalive_connections=PATH_CONCURRENCY * 2,
                 max_connections=PATH_CONCURRENCY * 2,

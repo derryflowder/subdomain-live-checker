@@ -97,6 +97,7 @@ def _check_url(
     scheme: str,
     timeout: float,
     verify: bool,
+    trust_env: bool,
 ) -> SubdomainResult:
     url = f"{scheme}://{hostname}/"
 
@@ -111,6 +112,7 @@ def _check_url(
                 follow_redirects=True,
                 headers=DEFAULT_HEADERS,
                 verify=verify,
+                trust_env=trust_env,
             ) as response:
                 body = bytearray()
 
@@ -182,11 +184,12 @@ def check_subdomain(
     hostname: str,
     timeout: float = DEFAULT_TIMEOUT,
     verify: bool = True,
+    trust_env: bool = True,
 ) -> SubdomainResult:
-    result = _check_url(hostname, "https", timeout, verify)
+    result = _check_url(hostname, "https", timeout, verify, trust_env)
 
     if result.error == "connection error":
-        fallback = _check_url(hostname, "http", timeout, verify)
+        fallback = _check_url(hostname, "http", timeout, verify, trust_env)
         if fallback.error != "connection error":
             return fallback
 
@@ -206,6 +209,7 @@ def check_subdomains(
     max_workers: int = 20,
     paths: list[str] | None = None,
     verify: bool = True,
+    trust_env: bool = True,
     paths_timeout: float = DEFAULT_PATHS_TIMEOUT,
 ) -> list[SubdomainResult]:
     if not hostnames:
@@ -218,7 +222,10 @@ def check_subdomains(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
-                check_subdomain, host, verify=verify
+                check_subdomain,
+                host,
+                verify=verify,
+                trust_env=trust_env,
             ): host
             for host in unique_hostnames
         }
@@ -258,8 +265,9 @@ def check_subdomains(
                 check_paths_for_result,
                 r,
                 paths,
-                paths_timeout,
-                verify,
+                timeout=paths_timeout,
+                verify=verify,
+                trust_env=trust_env,
             ): r
             for r in checkable
         }
