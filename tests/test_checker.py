@@ -1,3 +1,5 @@
+import threading
+
 import httpx
 
 from src.checker import check_subdomain, check_subdomains, classify_status, extract_title
@@ -29,7 +31,6 @@ def mock_stream(monkeypatch, response: httpx.Response) -> None:
         "stream",
         lambda *args, **kwargs: FakeStreamResponse(response),
     )
-
 
 
 def test_subdomain_result_stores_http_data() -> None:
@@ -80,8 +81,6 @@ def test_extract_title_returns_none_when_missing() -> None:
     assert extract_title("<html><body>Hello</body></html>") is None
 
 
-
-
 def test_check_subdomain_limits_html_for_title(monkeypatch) -> None:
     request = httpx.Request("GET", "https://example.com/")
     html = "A" * 65536 + "<title>Too Late</title>"
@@ -98,8 +97,6 @@ def test_check_subdomain_limits_html_for_title(monkeypatch) -> None:
     result = check_subdomain("example.com")
 
     assert result.title is None
-
-
 
 
 def test_check_subdomain_collects_http_data(monkeypatch) -> None:
@@ -156,7 +153,6 @@ def test_check_subdomain_detects_redirect_history(monkeypatch) -> None:
     assert result.final_url == "https://www.example.com/"
 
 
-
 def test_check_subdomain_handles_timeout(monkeypatch) -> None:
     def fake_stream(*args, **kwargs):
         raise httpx.TimeoutException("request timed out")
@@ -171,8 +167,6 @@ def test_check_subdomain_handles_timeout(monkeypatch) -> None:
     assert result.response_time_ms is not None
 
 
-
-
 def test_check_subdomain_handles_connection_error(monkeypatch) -> None:
     def fake_stream(*args, **kwargs):
         raise httpx.ConnectError("connection failed")
@@ -185,7 +179,6 @@ def test_check_subdomain_handles_connection_error(monkeypatch) -> None:
     assert result.status_code is None
     assert result.error == "connection error"
     assert result.response_time_ms is not None
-
 
 
 def test_classify_status() -> None:
@@ -203,11 +196,13 @@ def test_classify_status_handles_unknown_error() -> None:
     assert classify_status(None, "something else") == ResultStatus.ERROR
 
 
-def test_check_subdomains_checks_hostnames_in_order(monkeypatch) -> None:
-    checked_hostnames: list[str] = []
+def test_check_subdomains_checks_all_hostnames(monkeypatch) -> None:
+    checked_hostnames: set[str] = set()
+    lock = threading.Lock()
 
-    def fake_check_subdomain(hostname: str) -> SubdomainResult:
-        checked_hostnames.append(hostname)
+    def fake_check_subdomain(hostname: str, **kwargs) -> SubdomainResult:
+        with lock:
+            checked_hostnames.add(hostname)
 
         return SubdomainResult(
             hostname=hostname,
@@ -225,14 +220,13 @@ def test_check_subdomains_checks_hostnames_in_order(monkeypatch) -> None:
 
     results = check_subdomains(hostnames)
 
-    assert checked_hostnames == hostnames
+    assert checked_hostnames == set(hostnames)
     assert [result.hostname for result in results] == hostnames
     assert all(result.status == ResultStatus.LIVE for result in results)
 
-def test_check_subdomains_preserves_order(monkeypatch) -> None:
-    from src.models import ResultStatus, SubdomainResult
 
-    def fake_check(hostname: str) -> SubdomainResult:
+def test_check_subdomains_preserves_order(monkeypatch) -> None:
+    def fake_check(hostname: str, **kwargs) -> SubdomainResult:
         return SubdomainResult(
             hostname=hostname,
             status=ResultStatus.LIVE,

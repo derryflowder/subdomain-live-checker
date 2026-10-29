@@ -14,6 +14,7 @@ VALID_FILTERS = {
     "Changed",
     "Removed",
     "Takeover",
+    "With findings",
 }
 
 
@@ -22,7 +23,6 @@ def filter_results(
     filter_name: str = "All",
     query: str = "",
 ) -> list[SubdomainResult]:
-    """Filter scan results by category and hostname."""
     if filter_name not in VALID_FILTERS:
         raise ValueError(f"Unknown filter: {filter_name}")
 
@@ -30,8 +30,21 @@ def filter_results(
     filtered = []
 
     for result in results:
-        if normalized_query not in result.hostname.casefold():
-            continue
+        if normalized_query:
+            haystack = " ".join(
+                filter(
+                    None,
+                    [
+                        result.hostname,
+                        result.title or "",
+                        result.error or "",
+                        " ".join(t.display() for t in result.technologies),
+                        " ".join(f.path for f in result.findings),
+                    ],
+                )
+            ).casefold()
+            if normalized_query not in haystack:
+                continue
 
         if filter_name == "Live":
             if result.is_removed or result.status not in LIVE_STATUSES:
@@ -46,6 +59,8 @@ def filter_results(
         elif filter_name == "Removed" and not result.is_removed:
             continue
         elif filter_name == "Takeover" and not result.takeover:
+            continue
+        elif filter_name == "With findings" and not result.findings:
             continue
 
         filtered.append(result)

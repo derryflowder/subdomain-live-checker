@@ -12,14 +12,20 @@ class WorkerSignals(QObject):
 
 
 class Worker(QRunnable):
-    def __init__(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        function: Callable[..., Any],
+        *args: Any,
+        _signals: WorkerSignals | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__()
         self.setAutoDelete(False)
 
         self.function = function
         self.args = args
         self.kwargs = kwargs
-        self.signals = WorkerSignals()
+        self.signals = _signals if _signals is not None else WorkerSignals()
 
     def run(self) -> None:
         try:

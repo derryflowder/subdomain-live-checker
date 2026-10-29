@@ -49,6 +49,8 @@ def test_build_csv_contains_headers_and_result_flags() -> None:
         "Final URL",
         "Content-Type",
         "Server",
+        "Technologies",
+        "Findings",
     ]
 
     assert rows[1][0] == "www.example.com"
